@@ -11,11 +11,16 @@
     .result { white-space: pre-wrap; background: #f6f6f6; padding: 16px; border-radius: 8px; margin-top: 24px; line-height: 1.6; }
     .error { color: #b00020; margin-top: 12px; }
     .note { color: #666; font-size: 0.85rem; margin-top: 8px; }
+    footer { margin-top: 40px; font-size: 0.8rem; color: #888; }
+    footer a { color: #888; }
   </style>
 </head>
 <body>
   <h1>文字起こしを貼るだけで、要約と次にやることが分かる</h1>
-  <p class="note">入力したテキストはサーバーに保存されません(処理のみ)。</p>
+  <p class="note">
+    入力したテキストはサーバーに保存されません(処理のみ)。要約生成のため、入力内容はAnthropic社のAI「Claude」に送信されます。
+    詳細は<a href="/privacy">プライバシーポリシー</a>をご確認ください。
+  </p>
   <form method="post">
     <textarea name="transcript" placeholder="Zoomの文字起こしや面談メモをここに貼り付けてください">{{ transcript }}</textarea>
     <br>
@@ -29,5 +34,11 @@
   {% if result %}
   <div class="result">{{ result }}</div>
   {% endif %}
+
+  <footer>
+    <a href="/waitlist">早期アクセス申し込み</a> ・
+    <a href="/privacy">プライバシーポリシー</a> ・
+    <a href="/terms">利用規約</a>
+  </footer>
 </body>
 </html>

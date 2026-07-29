@@ -14,6 +14,8 @@
     .error { color: #b00020; margin-top: 12px; }
     .success { background: #f0f8f0; border: 1px solid #cde6cd; padding: 20px; border-radius: 8px; line-height: 1.6; }
     .note { color: #666; font-size: 0.85rem; margin-top: 24px; }
+    footer { margin-top: 32px; font-size: 0.8rem; color: #888; }
+    footer a { color: #888; }
   </style>
 </head>
 <body>
@@ -27,7 +29,8 @@
   <p class="lead">
     文字起こしを貼るだけで、要約・決定事項・Next Actionを自動抽出するツールです。<br>
     録音・文字起こし機能は持たせていません(テキスト入力のみ)。クライアントの音声データを預からない設計なので、
-    守秘義務が重いコンサル・コーチ業の方でも安心してお使いいただけます。
+    守秘義務が重いコンサル・コーチ業の方でも安心してお使いいただけます。<br>
+    (要約生成のため、入力テキストはAnthropic社のAI「Claude」に送信されます。詳細は<a href="/privacy">プライバシーポリシー</a>をご確認ください)
   </p>
 
   <form method="post">
@@ -47,7 +50,13 @@
   <div class="error">{{ error }}</div>
   {% endif %}
 
-  <p class="note">入力いただいた情報は早期アクセスのご案内のみに使用します。</p>
+  <p class="note">入力いただいた情報は早期アクセスのご案内のみに使用します。詳細は<a href="/privacy">プライバシーポリシー</a>をご覧ください。</p>
   {% endif %}
+
+  <footer>
+    <a href="/">トップページ</a> ・
+    <a href="/privacy">プライバシーポリシー</a> ・
+    <a href="/terms">利用規約</a>
+  </footer>
 </body>
 </html>
