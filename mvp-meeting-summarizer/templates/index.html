@@ -11,6 +11,9 @@
     .result { white-space: pre-wrap; background: #f6f6f6; padding: 16px; border-radius: 8px; margin-top: 24px; line-height: 1.6; }
     .error { color: #b00020; margin-top: 12px; }
     .note { color: #666; font-size: 0.85rem; margin-top: 8px; }
+    .quota { color: #1a5fb4; font-size: 0.85rem; margin-top: 4px; }
+    .access-code { margin-top: 12px; }
+    .access-code input { padding: 6px; font-size: 0.9rem; width: 200px; }
     footer { margin-top: 40px; font-size: 0.8rem; color: #888; }
     footer a { color: #888; }
   </style>
@@ -21,9 +24,17 @@
     入力したテキストはサーバーに保存されません(処理のみ)。要約生成のため、入力内容はAnthropic社のAI「Claude」に送信されます。
     詳細は<a href="/privacy">プライバシーポリシー</a>をご確認ください。
   </p>
+  <p class="quota">
+    無料枠: 今月あと{{ remaining_free }}/{{ free_limit }}回利用できます。
+    それ以上使いたい方は<a href="/waitlist">早期アクセス申し込み</a>からアクセスコードをご購入ください。
+  </p>
   <form method="post">
     <textarea name="transcript" placeholder="Zoomの文字起こしや面談メモをここに貼り付けてください">{{ transcript }}</textarea>
     <br>
+    <div class="access-code">
+      <label for="access_code">アクセスコード(お持ちの方のみ):</label><br>
+      <input type="text" id="access_code" name="access_code" value="{{ access_code }}" placeholder="GJK-XXXXXXXX">
+    </div>
     <button type="submit">要約・タスク抽出する</button>
   </form>
 
