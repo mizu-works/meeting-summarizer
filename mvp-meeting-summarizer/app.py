@@ -83,6 +83,18 @@ def create_access_code(session_id, uses=PACK_USES):
     return code
 
 
+def code_has_remaining_uses(code):
+    """Check validity without consuming a use."""
+    if not code or not os.path.exists(ACCESS_CODES_FILE):
+        return False
+    with open(ACCESS_CODES_FILE, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["code"] == code.strip() and int(row["remaining_uses"]) > 0:
+                return True
+    return False
+
+
 def redeem_code(code):
     """Validate a code and consume one use. Returns True if a use was consumed."""
     if not code or not os.path.exists(ACCESS_CODES_FILE):
@@ -137,7 +149,7 @@ def index():
             allowed = False
             used_code = False
             if access_code:
-                if redeem_code(access_code):
+                if code_has_remaining_uses(access_code):
                     allowed = True
                     used_code = True
                 else:
@@ -158,11 +170,25 @@ def index():
                         system=SYSTEM_PROMPT,
                         messages=[{"role": "user", "content": transcript}],
                     )
-                    result = message.content[0].text
-                    if not used_code:
-                        record_free_use(ip)
-                except Exception as exc:
-                    error = f"処理中にエラーが発生しました: {exc}"
+                    text_blocks = [
+                        block.text for block in message.content if block.type == "text"
+                    ]
+                    if text_blocks:
+                        result = "\n".join(text_blocks)
+                        # Only consume a use once we actually have a result.
+                        if used_code:
+                            redeem_code(access_code)
+                        else:
+                            record_free_use(ip)
+                    elif message.stop_reason == "refusal":
+                        error = (
+                            "入力内容がAIの安全基準により処理を拒否されました。"
+                            "内容をご確認のうえ、再度お試しください。"
+                        )
+                    else:
+                        error = "AIからの応答を取得できませんでした。もう一度お試しください。"
+                except Exception:
+                    error = "処理中にエラーが発生しました。時間をおいて再度お試しください。"
 
         remaining_free = FREE_MONTHLY_LIMIT - count_free_uses_this_month(ip)
 
