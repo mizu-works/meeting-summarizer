@@ -1,0 +1,265 @@
+"""Automated tests for the meeting-summarizer MVP.
+
+Run with: pytest test_app.py -v
+
+These exist because a production bug (Claude Sonnet 5 returning a
+thinking block before the text block) shipped despite being manually
+"tested" once. Paid/core-logic code must have real regression coverage,
+not ad hoc manual checks. See:
+.company/engineering/debug-log/2026-07-29-thinking-block-crash.md
+"""
+
+import os
+import shutil
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+
+import app as app_module
+
+DATA_DIR = app_module.DATA_DIR
+
+
+@pytest.fixture(autouse=True)
+def clean_data_dir():
+    """Every test starts with no persisted usage/code/waitlist data."""
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR)
+    yield
+    if os.path.exists(DATA_DIR):
+        shutil.rmtree(DATA_DIR)
+
+
+@pytest.fixture
+def client():
+    app_module.app.config["TESTING"] = True
+    return app_module.app.test_client()
+
+
+def text_block(text):
+    return SimpleNamespace(type="text", text=text)
+
+
+def thinking_block():
+    return SimpleNamespace(type="thinking", thinking="")
+
+
+def fake_message(content, stop_reason="end_turn"):
+    return SimpleNamespace(content=content, stop_reason=stop_reason)
+
+
+SAMPLE_TRANSCRIPT = "田中: 来週の件、決定しました。佐藤: 了解です。"
+
+
+# --- Core response parsing (the bug that shipped) ---------------------------
+
+
+def test_thinking_block_before_text_block_still_returns_result(client):
+    """Regression test for the production crash: content[0] must not be
+    assumed to be the text block."""
+    with patch.object(
+        app_module.client.messages,
+        "create",
+        return_value=fake_message([thinking_block(), text_block("## 要約\nテスト結果")]),
+    ):
+        r = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    body = r.data.decode("utf-8")
+    assert "テスト結果" in body
+    assert "エラー" not in body
+
+
+def test_text_only_response_still_works(client):
+    with patch.object(
+        app_module.client.messages,
+        "create",
+        return_value=fake_message([text_block("## 要約\nシンプルな結果")]),
+    ):
+        r = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    assert "シンプルな結果" in r.data.decode("utf-8")
+
+
+def test_refusal_shows_friendly_message_not_crash(client):
+    with patch.object(
+        app_module.client.messages,
+        "create",
+        return_value=fake_message([], stop_reason="refusal"),
+    ):
+        r = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    body = r.data.decode("utf-8")
+    assert r.status_code == 200
+    assert "安全基準" in body
+
+
+def test_empty_content_non_refusal_shows_friendly_message(client):
+    with patch.object(
+        app_module.client.messages,
+        "create",
+        return_value=fake_message([], stop_reason="max_tokens"),
+    ):
+        r = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    body = r.data.decode("utf-8")
+    assert r.status_code == 200
+    assert "応答を取得できません" in body
+
+
+def test_api_exception_shows_generic_message_not_raw_exception(client):
+    with patch.object(
+        app_module.client.messages, "create", side_effect=RuntimeError("boom")
+    ):
+        r = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    body = r.data.decode("utf-8")
+    assert r.status_code == 200
+    assert "boom" not in body  # never leak raw exception text to users
+    assert "エラーが発生しました" in body
+
+
+# --- Free quota gating --------------------------------------------------
+
+
+def test_free_quota_allows_up_to_limit_then_blocks(client):
+    with patch.object(
+        app_module.client.messages,
+        "create",
+        return_value=fake_message([text_block("OK")]),
+    ):
+        for i in range(app_module.FREE_MONTHLY_LIMIT):
+            r = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+            assert "OK" in r.data.decode("utf-8"), f"use {i + 1} should succeed"
+
+        r = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+        body = r.data.decode("utf-8")
+        assert "上限に達しました" in body
+
+
+def test_failed_api_call_does_not_consume_free_quota(client):
+    with patch.object(
+        app_module.client.messages, "create", side_effect=RuntimeError("boom")
+    ):
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    assert app_module.count_free_uses_this_month("127.0.0.1") == 0
+
+
+# --- Paid access codes ---------------------------------------------------
+
+
+def test_valid_code_bypasses_free_limit_and_is_consumed_on_success(client):
+    code = app_module.create_access_code("sess_1", uses=1)
+    with patch.object(
+        app_module.client.messages,
+        "create",
+        return_value=fake_message([text_block("paid result")]),
+    ):
+        r = client.post(
+            "/", data={"transcript": SAMPLE_TRANSCRIPT, "access_code": code}
+        )
+    assert "paid result" in r.data.decode("utf-8")
+    assert app_module.code_has_remaining_uses(code) is False
+
+
+def test_code_not_consumed_when_api_call_fails(client):
+    """A paying customer must not lose a use to a transient API error."""
+    code = app_module.create_access_code("sess_2", uses=1)
+    with patch.object(
+        app_module.client.messages, "create", side_effect=RuntimeError("boom")
+    ):
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT, "access_code": code})
+    assert app_module.code_has_remaining_uses(code) is True
+
+
+def test_exhausted_code_is_rejected(client):
+    code = app_module.create_access_code("sess_3", uses=1)
+    app_module.redeem_code(code)  # use it up
+    r = client.post(
+        "/", data={"transcript": SAMPLE_TRANSCRIPT, "access_code": code}
+    )
+    assert "アクセスコードが無効" in r.data.decode("utf-8")
+
+
+def test_unknown_code_is_rejected(client):
+    r = client.post(
+        "/", data={"transcript": SAMPLE_TRANSCRIPT, "access_code": "NOT-A-REAL-CODE"}
+    )
+    assert "アクセスコードが無効" in r.data.decode("utf-8")
+
+
+# --- /purchase/success ----------------------------------------------------
+
+
+def test_purchase_success_requires_session_id(client):
+    r = client.get("/purchase/success")
+    assert "セッション情報が見つかりません" in r.data.decode("utf-8")
+
+
+def test_purchase_success_handles_stripe_lookup_failure(client):
+    with patch.object(
+        app_module.stripe.checkout.Session,
+        "retrieve",
+        side_effect=RuntimeError("network error"),
+    ):
+        r = client.get("/purchase/success?session_id=sess_bad")
+    body = r.data.decode("utf-8")
+    assert "network error" not in body
+    assert "確認に失敗" in body
+
+
+def test_purchase_success_rejects_unpaid_session(client):
+    with patch.object(
+        app_module.stripe.checkout.Session,
+        "retrieve",
+        return_value=SimpleNamespace(payment_status="unpaid"),
+    ):
+        r = client.get("/purchase/success?session_id=sess_unpaid")
+    assert "お支払いが完了していません" in r.data.decode("utf-8")
+
+
+def test_purchase_success_issues_code_for_paid_session(client):
+    with patch.object(
+        app_module.stripe.checkout.Session,
+        "retrieve",
+        return_value=SimpleNamespace(payment_status="paid"),
+    ):
+        r = client.get("/purchase/success?session_id=sess_paid_1")
+    body = r.data.decode("utf-8")
+    assert "GJK-" in body
+
+
+def test_purchase_success_is_idempotent_for_same_session(client):
+    """Reloading the confirmation page must not mint a second code."""
+    with patch.object(
+        app_module.stripe.checkout.Session,
+        "retrieve",
+        return_value=SimpleNamespace(payment_status="paid"),
+    ):
+        r1 = client.get("/purchase/success?session_id=sess_paid_2")
+        r2 = client.get("/purchase/success?session_id=sess_paid_2")
+
+    import re
+
+    code1 = re.search(r"GJK-[A-Z0-9]+", r1.data.decode("utf-8")).group()
+    code2 = re.search(r"GJK-[A-Z0-9]+", r2.data.decode("utf-8")).group()
+    assert code1 == code2
+
+
+# --- Waitlist --------------------------------------------------------------
+
+
+def test_waitlist_rejects_invalid_email(client):
+    r = client.post("/waitlist", data={"email": "not-an-email"})
+    assert "有効なメールアドレス" in r.data.decode("utf-8")
+
+
+def test_waitlist_accepts_valid_submission(client):
+    r = client.post(
+        "/waitlist",
+        data={"email": "test@example.com", "role": "test", "note": "test"},
+    )
+    assert "申し込みありがとうございます" in r.data.decode("utf-8")
+
+
+# --- Static pages -----------------------------------------------------------
+
+
+def test_privacy_and_terms_pages_load(client):
+    assert client.get("/privacy").status_code == 200
+    assert client.get("/terms").status_code == 200
