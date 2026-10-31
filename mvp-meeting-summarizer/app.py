@@ -1,6 +1,8 @@
 import csv
+import json
 import os
-import random
+import re
+import secrets
 import string
 from datetime import datetime, timezone
 
@@ -12,6 +14,8 @@ from flask import Flask, render_template, request
 load_dotenv()
 
 app = Flask(__name__)
+# Generous for a cleaned-up hour-long subtitle file, but stops huge uploads.
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
 client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
 
@@ -21,6 +25,9 @@ ACCESS_CODES_FILE = os.path.join(DATA_DIR, "access_codes.csv")
 FREE_USAGE_FILE = os.path.join(DATA_DIR, "free_usage.csv")
 FREE_MONTHLY_LIMIT = 5
 PACK_USES = 10
+MAX_TRANSCRIPT_CHARS = 50000
+MODEL = "claude-sonnet-5"
+MAX_TOKENS = 16000
 
 
 def get_client_ip():
@@ -57,7 +64,14 @@ def record_free_use(ip):
 
 def generate_access_code():
     chars = string.ascii_uppercase + string.digits
-    return "GJK-" + "".join(random.choices(chars, k=8))
+    return "GJK-" + "".join(secrets.choice(chars) for _ in range(8))
+
+
+def normalize_code(code):
+    return (code or "").strip().upper()
+
+
+ACCESS_CODE_PATTERN = re.compile(r"^GJK-[A-Z0-9]{8}$")
 
 
 def find_access_code_by_session(session_id):
@@ -71,9 +85,20 @@ def find_access_code_by_session(session_id):
     return None
 
 
-def create_access_code(session_id, uses=PACK_USES):
+def find_access_code_row(code):
+    if not os.path.exists(ACCESS_CODES_FILE):
+        return None
+    with open(ACCESS_CODES_FILE, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["code"] == code:
+                return row
+    return None
+
+
+def create_access_code(session_id, uses=PACK_USES, code=None):
     os.makedirs(DATA_DIR, exist_ok=True)
-    code = generate_access_code()
+    code = code or generate_access_code()
     is_new_file = not os.path.exists(ACCESS_CODES_FILE)
     with open(ACCESS_CODES_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -83,68 +108,272 @@ def create_access_code(session_id, uses=PACK_USES):
     return code
 
 
+# --- Stripe backup of access codes -------------------------------------------
+# data/ is wiped on every Render free-plan redeploy, which would make paid codes
+# vanish. Each code and its remaining uses are mirrored into the metadata of the
+# Stripe PaymentIntent that paid for it, and restored from there on a local miss.
+
+
+def _metadata(obj):
+    md = getattr(obj, "metadata", None)
+    if md is None:
+        return {}
+    return md.to_dict() if hasattr(md, "to_dict") else dict(md)
+
+
+def _payment_intent_id(session):
+    pi = getattr(session, "payment_intent", None)
+    if pi is None or isinstance(pi, str):
+        return pi
+    return getattr(pi, "id", None)
+
+
+def backup_code_to_stripe(session_id, code, remaining, payment_intent_id=None):
+    """Best effort: the local file stays the source of truth while it exists."""
+    try:
+        if not payment_intent_id:
+            payment_intent_id = _payment_intent_id(stripe.checkout.Session.retrieve(session_id))
+        if not payment_intent_id:
+            return False
+        stripe.PaymentIntent.modify(
+            payment_intent_id,
+            metadata={
+                "access_code": code,
+                "remaining_uses": str(remaining),
+                "checkout_session_id": session_id,
+            },
+        )
+        return True
+    except Exception:
+        app.logger.exception("Failed to back up access code %s to Stripe", code)
+        return False
+
+
+def restore_code_from_stripe(code):
+    """Recreate a local code row from Stripe. Returns True if restored."""
+    if not ACCESS_CODE_PATTERN.match(code):
+        return False  # also keeps arbitrary input out of the search query
+    try:
+        results = stripe.PaymentIntent.search(query=f"metadata['access_code']:'{code}'")
+    except Exception:
+        app.logger.exception("Failed to look up access code %s in Stripe", code)
+        return False
+    for pi in getattr(results, "data", []):
+        md = _metadata(pi)
+        if getattr(pi, "status", None) != "succeeded" or md.get("access_code") != code:
+            continue
+        try:
+            remaining = int(md.get("remaining_uses", PACK_USES))
+        except ValueError:
+            remaining = PACK_USES
+        create_access_code(md.get("checkout_session_id", ""), remaining, code=code)
+        return True
+    return False
+
+
 def code_has_remaining_uses(code):
     """Check validity without consuming a use."""
-    if not code or not os.path.exists(ACCESS_CODES_FILE):
+    code = normalize_code(code)
+    if not code:
         return False
-    with open(ACCESS_CODES_FILE, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if row["code"] == code.strip() and int(row["remaining_uses"]) > 0:
-                return True
-    return False
+    row = find_access_code_row(code)
+    if row is None and restore_code_from_stripe(code):
+        row = find_access_code_row(code)
+    return row is not None and int(row["remaining_uses"]) > 0
 
 
 def redeem_code(code):
     """Validate a code and consume one use. Returns True if a use was consumed."""
+    code = normalize_code(code)
     if not code or not os.path.exists(ACCESS_CODES_FILE):
         return False
     rows = []
-    consumed = False
+    consumed = None
     with open(ACCESS_CODES_FILE, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames
         for row in reader:
-            if row["code"] == code.strip() and int(row["remaining_uses"]) > 0:
+            if consumed is None and row["code"] == code and int(row["remaining_uses"]) > 0:
                 row["remaining_uses"] = str(int(row["remaining_uses"]) - 1)
-                consumed = True
+                consumed = row
             rows.append(row)
-    if consumed:
-        with open(ACCESS_CODES_FILE, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
-    return consumed
+    if consumed is None:
+        return False
+    with open(ACCESS_CODES_FILE, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    if consumed["stripe_session_id"]:
+        backup_code_to_stripe(consumed["stripe_session_id"], code, consumed["remaining_uses"])
+    return True
+
+
+TIMESTAMP_LINE = re.compile(r"^\s*(\d{1,2}:)?\d{1,2}:\d{2}[.,]\d{1,3}\s*-->")
+SPEAKER_LINE = re.compile(r"^([^:：\s][^:：]{0,29})[:：]\s*(.*)$")
+VOICE_TAG = re.compile(r"^<v(?:\.[^\s>]*)?\s+([^>]+)>(.*?)(?:</v>)?$")
+
+
+def clean_transcript(text):
+    """Turn Zoom/Teams .vtt or .srt subtitles into plain "name: text" lines.
+
+    Timestamps and cue numbers are dropped and consecutive lines by the same
+    speaker are merged. Anything that isn't subtitles is returned unchanged.
+    """
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not any(TIMESTAMP_LINE.match(line) for line in text.split("\n")):
+        return text
+
+    entries = []  # [speaker or None, text]
+    for block in re.split(r"\n\s*\n", text):
+        lines = block.strip("\n").split("\n")
+        ts = next((i for i, line in enumerate(lines) if TIMESTAMP_LINE.match(line)), None)
+        if ts is None:
+            continue  # WEBVTT header, NOTE, STYLE, REGION blocks
+        for line in lines[ts + 1:]:
+            line = line.strip()
+            voice = VOICE_TAG.match(line)
+            if voice:
+                speaker, body = voice.group(1).strip(), voice.group(2)
+            else:
+                m = SPEAKER_LINE.match(re.sub(r"<[^>]+>", "", line))
+                speaker, body = (m.group(1).strip(), m.group(2)) if m else (None, line)
+            body = re.sub(r"<[^>]+>", "", body).strip()
+            if not body:
+                continue
+            prev = entries[-1][0] if entries else None
+            # Same speaker continues, or an unnamed line continues a named one.
+            if entries and prev is not None and speaker in (None, prev):
+                entries[-1][1] += " " + body
+            else:
+                entries.append([speaker, body])
+    return "\n".join(f"{sp}: {body}" if sp else body for sp, body in entries)
+
 
 SYSTEM_PROMPT = """あなたは商談・面談の文字起こしから重要情報を抽出するアシスタントです。
-入力されたテキストを読み、以下の3セクションで日本語で出力してください。他の説明は書かないでください。
+入力されたテキストを読み、指定のJSON形式で日本語で出力してください。
 
-## 要約
-(3〜5行で会話全体の要点をまとめる)
+- summary: 会話全体の要点を3〜5行でまとめた文章
+- decisions: 会話の中で決まったこと。なければ空配列
+- todos: 会話の後に誰かがやるべきこと(ToDo)。1件につき1つの具体的な作業にする
+  - task: 何をするか(「〜する」で終わる短い文)
+  - owner: 担当者。本文から分からなければ空文字
+  - due: 期限。本文の表現のまま(例: 「来週金曜」「10/31」)。分からなければ空文字
+  ToDoがなければ空配列
 
-## 決定事項
-- (箇条書き。決定事項がなければ「特になし」)
-
-## Next Action
-- (担当者・期限が本文にあれば含めて箇条書き。なければ「特になし」)
+本文に書かれていない担当者や期限を推測で埋めないでください。
 """
+
+SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "decisions": {"type": "array", "items": {"type": "string"}},
+        "todos": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "owner": {"type": "string"},
+                    "due": {"type": "string"},
+                },
+                "required": ["task", "owner", "due"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["summary", "decisions", "todos"],
+    "additionalProperties": False,
+}
+
+
+def parse_summary(text):
+    """Parse the model's JSON output. Returns None if it isn't the expected shape."""
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("summary"), str):
+        return None
+    decisions = [d for d in data.get("decisions") or [] if isinstance(d, str) and d.strip()]
+    todos = []
+    for t in data.get("todos") or []:
+        if isinstance(t, dict) and str(t.get("task", "")).strip():
+            todos.append(
+                {
+                    "task": str(t.get("task", "")).strip(),
+                    "owner": str(t.get("owner", "")).strip(),
+                    "due": str(t.get("due", "")).strip(),
+                }
+            )
+    return {"summary": data["summary"].strip(), "decisions": decisions, "todos": todos}
+
+
+def summary_to_markdown(s):
+    lines = ["## 要約", s["summary"], "", "## 決定事項"]
+    lines += [f"- {d}" for d in s["decisions"]] or ["- 特になし"]
+    lines += ["", "## ToDo"]
+    if not s["todos"]:
+        lines.append("- 特になし")
+    for t in s["todos"]:
+        meta = [f"担当: {t['owner']}" if t["owner"] else "", f"期限: {t['due']}" if t["due"] else ""]
+        meta = " / ".join(m for m in meta if m)
+        lines.append(f"- [ ] {t['task']}" + (f"({meta})" if meta else ""))
+    return "\n".join(lines)
+
+
+def summarize(transcript):
+    """Call Claude and return (summary, markdown, error, message).
+
+    summary is None when the output wasn't the expected JSON; markdown then
+    holds the raw text. Exactly one of markdown / error is set.
+    """
+    # Sonnet 5 thinks by default and thinking tokens count toward
+    # max_tokens, so a small cap truncates the actual answer.
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": transcript}],
+        output_config={"format": {"type": "json_schema", "schema": SUMMARY_SCHEMA}},
+    )
+    text_blocks = [block.text for block in message.content if block.type == "text"]
+    # Check stop_reason first: a refusal or a truncated response
+    # can still carry partial text that must not be shown or billed.
+    if message.stop_reason == "refusal":
+        error = (
+            "入力内容がAIの安全基準により処理を拒否されました。"
+            "内容をご確認のうえ、再度お試しください。"
+        )
+        return None, None, error, message
+    if message.stop_reason == "max_tokens" or not text_blocks:
+        return None, None, "AIからの応答を取得できませんでした。もう一度お試しください。", message
+    raw = "\n".join(text_blocks)
+    summary = parse_summary(raw)
+    return summary, (summary_to_markdown(summary) if summary else raw), None, message
 
 
 @app.route("/", methods=["GET", "POST"])
 def index():
     result = None
+    summary = None
     error = None
     transcript = ""
     access_code = ""
     remaining_free = FREE_MONTHLY_LIMIT - count_free_uses_this_month(get_client_ip())
 
     if request.method == "POST":
-        transcript = request.form.get("transcript", "").strip()
+        transcript = clean_transcript(request.form.get("transcript", "")).strip()
         access_code = request.form.get("access_code", "").strip()
         ip = get_client_ip()
 
         if not transcript:
             error = "テキストを貼り付けてください。"
+        elif len(transcript) > MAX_TRANSCRIPT_CHARS:
+            error = (
+                f"テキストが長すぎます({len(transcript):,}文字)。"
+                f"{MAX_TRANSCRIPT_CHARS:,}文字以内に分けて貼り付けてください。"
+            )
         else:
             allowed = False
             used_code = False
@@ -164,29 +393,13 @@ def index():
 
             if allowed:
                 try:
-                    message = client.messages.create(
-                        model="claude-sonnet-5",
-                        max_tokens=1024,
-                        system=SYSTEM_PROMPT,
-                        messages=[{"role": "user", "content": transcript}],
-                    )
-                    text_blocks = [
-                        block.text for block in message.content if block.type == "text"
-                    ]
-                    if text_blocks:
-                        result = "\n".join(text_blocks)
-                        # Only consume a use once we actually have a result.
+                    summary, result, error, _ = summarize(transcript)
+                    # Only consume a use once we actually have a result.
+                    if result:
                         if used_code:
                             redeem_code(access_code)
                         else:
                             record_free_use(ip)
-                    elif message.stop_reason == "refusal":
-                        error = (
-                            "入力内容がAIの安全基準により処理を拒否されました。"
-                            "内容をご確認のうえ、再度お試しください。"
-                        )
-                    else:
-                        error = "AIからの応答を取得できませんでした。もう一度お試しください。"
                 except Exception:
                     error = "処理中にエラーが発生しました。時間をおいて再度お試しください。"
 
@@ -195,12 +408,21 @@ def index():
     return render_template(
         "index.html",
         result=result,
+        summary=summary,
         error=error,
         transcript=transcript,
         access_code=access_code,
         remaining_free=max(remaining_free, 0),
         free_limit=FREE_MONTHLY_LIMIT,
+        max_chars=MAX_TRANSCRIPT_CHARS,
     )
+
+
+def csv_safe(value):
+    """Stop spreadsheet apps from running user input as a formula when the CSV is opened."""
+    if value and value[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
 
 
 @app.route("/waitlist", methods=["GET", "POST"])
@@ -223,11 +445,38 @@ def waitlist():
                 if is_new_file:
                     writer.writerow(["timestamp", "email", "role", "note"])
                 writer.writerow(
-                    [datetime.now(timezone.utc).isoformat(), email, role, note]
+                    [
+                        datetime.now(timezone.utc).isoformat(),
+                        csv_safe(email),
+                        csv_safe(role),
+                        csv_safe(note),
+                    ]
                 )
             submitted = True
 
     return render_template("waitlist.html", submitted=submitted, error=error)
+
+
+def restore_code_for_session(session):
+    """After a redeploy, reloading the success page must show the same code, not mint a new one."""
+    pi_id = _payment_intent_id(session)
+    if not pi_id:
+        return None
+    try:
+        pi = stripe.PaymentIntent.retrieve(pi_id)
+    except Exception:
+        app.logger.exception("Failed to retrieve PaymentIntent %s", pi_id)
+        return None
+    code = _metadata(pi).get("access_code")
+    if code and (find_access_code_row(code) or restore_code_from_stripe(code)):
+        return code
+    return None
+
+
+def create_and_back_up_code(session_id, session):
+    code = create_access_code(session_id)
+    backup_code_to_stripe(session_id, code, PACK_USES, _payment_intent_id(session))
+    return code
 
 
 @app.route("/purchase/success")
@@ -253,7 +502,10 @@ def purchase_success():
         )
 
     existing = find_access_code_by_session(session_id)
-    code = existing["code"] if existing else create_access_code(session_id)
+    if existing:
+        code = existing["code"]
+    else:
+        code = restore_code_for_session(session) or create_and_back_up_code(session_id, session)
 
     return render_template("purchase_success.html", error=None, code=code, uses=PACK_USES)
 

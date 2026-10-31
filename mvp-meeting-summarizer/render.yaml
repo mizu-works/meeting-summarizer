@@ -1,13 +1,17 @@
-# Freeプラン向け設定。waitlist.csvは永続ディスクなしのため
+# Freeプラン向け設定。data/ 配下(waitlist.csv など)は永続ディスクなしのため
 # 再デプロイ・再起動時にリセットされる可能性があります(検証段階では許容)。
-# 有料プランに切り替える場合は disk セクションを追加してください。
+# アクセスコードは Stripe 側にもバックアップされ、消えても自動で復元される(README参照)。
+# waitlist も残したい場合は有料プランに切り替えて disk セクションを追加してください。
 services:
   - type: web
     name: meeting-summarizer
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    # Sonnet 5 は考えてから答えるため、長い入力では gunicorn 既定の30秒を超えることがある
+    startCommand: gunicorn app:app --timeout 180
     envVars:
       - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: STRIPE_SECRET_KEY
         sync: false
