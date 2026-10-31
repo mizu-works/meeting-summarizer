@@ -414,6 +414,21 @@ SUMMARY_SCHEMA = {
 }
 
 
+EMAIL_INSTRUCTIONS = """
+- email: 会議の相手に送る、お礼と確認のメールの下書き(件名を1行目に「件名: 」で書き、本文を続ける)
+  - 決定事項と、相手・自分それぞれのToDo(担当・期限)を箇条書きで確認する
+  - 丁寧なビジネス文体。宛名と署名は「〇〇様」「(署名)」のように空欄にしておく
+  - 本文にない約束・金額・日付を書き足さない
+"""
+
+# Same schema plus an "email" field, used only when the user asks for a draft.
+SUMMARY_WITH_EMAIL_SCHEMA = {
+    **SUMMARY_SCHEMA,
+    "properties": {**SUMMARY_SCHEMA["properties"], "email": {"type": "string"}},
+    "required": SUMMARY_SCHEMA["required"] + ["email"],
+}
+
+
 def parse_summary(text):
     """Parse the model's JSON output. Returns None if it isn't the expected shape."""
     try:
@@ -433,7 +448,10 @@ def parse_summary(text):
                     "due": str(t.get("due", "")).strip(),
                 }
             )
-    return {"summary": data["summary"].strip(), "decisions": decisions, "todos": todos}
+    parsed = {"summary": data["summary"].strip(), "decisions": decisions, "todos": todos}
+    if isinstance(data.get("email"), str) and data["email"].strip():
+        parsed["email"] = data["email"].strip()
+    return parsed
 
 
 def summary_to_markdown(s):
@@ -446,11 +464,14 @@ def summary_to_markdown(s):
         meta = [f"担当: {t['owner']}" if t["owner"] else "", f"期限: {t['due']}" if t["due"] else ""]
         meta = " / ".join(m for m in meta if m)
         lines.append(f"- [ ] {t['task']}" + (f"({meta})" if meta else ""))
+    if s.get("email"):
+        lines += ["", "## メール下書き", s["email"]]
     return "\n".join(lines)
 
 
-def output_config():
-    config = {"format": {"type": "json_schema", "schema": SUMMARY_SCHEMA}}
+def output_config(with_email=False):
+    schema = SUMMARY_WITH_EMAIL_SCHEMA if with_email else SUMMARY_SCHEMA
+    config = {"format": {"type": "json_schema", "schema": schema}}
     if EFFORT:
         config["effort"] = EFFORT
     return config
@@ -476,7 +497,7 @@ def build_user_content(transcript, meeting_date=None):
     return f"会議の日付: {label}\n\n文字起こし:\n{transcript}"
 
 
-def summarize(transcript, meeting_date=None):
+def summarize(transcript, meeting_date=None, with_email=False):
     """Call Claude and return (summary, markdown, error, message).
 
     summary is None when the output wasn't the expected JSON; markdown then
@@ -487,9 +508,9 @@ def summarize(transcript, meeting_date=None):
     message = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
+        system=SYSTEM_PROMPT + EMAIL_INSTRUCTIONS if with_email else SYSTEM_PROMPT,
         messages=[{"role": "user", "content": build_user_content(transcript, meeting_date)}],
-        output_config=output_config(),
+        output_config=output_config(with_email),
     )
     text_blocks = [block.text for block in message.content if block.type == "text"]
     # Check stop_reason first: a refusal or a truncated response
@@ -557,12 +578,14 @@ def index():
     transcript = ""
     access_code = ""
     meeting_date = datetime.now(JST).date()
+    with_email = False
     remaining_free = FREE_MONTHLY_LIMIT - count_free_uses_this_month(get_client_ip())
 
     if request.method == "POST":
         transcript = clean_transcript(request.form.get("transcript", "")).strip()
         access_code = request.form.get("access_code", "").strip()
         meeting_date = parse_meeting_date(request.form.get("meeting_date"))
+        with_email = request.form.get("with_email") == "1"
         ip = get_client_ip()
 
         if not transcript:
@@ -596,7 +619,9 @@ def index():
                 started = time.monotonic()
                 message = None
                 try:
-                    summary, result, error, message = summarize(transcript, meeting_date)
+                    summary, result, error, message = summarize(
+                        transcript, meeting_date, with_email
+                    )
                 except Exception:
                     error = "処理中にエラーが発生しました。時間をおいて再度お試しください。"
                 log_usage(
@@ -622,6 +647,7 @@ def index():
         transcript=transcript,
         access_code=access_code,
         meeting_date=meeting_date.isoformat() if meeting_date else "",
+        with_email=with_email,
         remaining_free=max(remaining_free, 0),
         free_limit=FREE_MONTHLY_LIMIT,
         max_chars=MAX_TRANSCRIPT_CHARS,

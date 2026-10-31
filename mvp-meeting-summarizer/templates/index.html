@@ -23,6 +23,9 @@
     .example > summary { cursor: pointer; color: #1a5fb4; font-size: 0.9rem; }
     .example-input { white-space: pre-wrap; background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px; font-size: 0.85rem; font-family: inherit; }
     .example .summary { margin-top: 8px; }
+    .option { display: block; margin-top: 12px; font-size: 0.95rem; }
+    .email-draft { height: 260px; background: #fff; font-size: 0.9rem; line-height: 1.6; }
+    #copy-email { margin-top: 6px; padding: 6px 14px; font-size: 0.9rem; }
     .meeting-date { margin-top: 12px; }
     .meeting-date input { padding: 5px; font-size: 0.9rem; }
     .meeting-date .note { display: block; margin-top: 2px; }
@@ -105,6 +108,7 @@
       <input type="date" id="meeting_date" name="meeting_date" value="{{ meeting_date }}">
       <span class="note">「来週金曜」などの期限を、この日を基準に日付へ直します</span>
     </div>
+    <label class="option"><input type="checkbox" name="with_email" value="1"{% if with_email %} checked{% endif %}> お礼・確認メールの下書きも作る</label>
     <div class="access-code">
       <label for="access_code">アクセスコード(お持ちの方のみ):</label><br>
       <input type="text" id="access_code" name="access_code" value="{{ access_code }}" placeholder="GJK-XXXXXXXX" autocomplete="off">
@@ -246,6 +250,13 @@
     <p class="empty">特になし</p>
     {% endif %}
 
+    {% if summary.email %}
+    <h2>メール下書き</h2>
+    <textarea class="email-draft" id="email-draft" readonly>{{ summary.email }}</textarea>
+    <button type="button" id="copy-email">メールをコピー</button>
+    <span id="copy-email-status" class="note"></span>
+    {% endif %}
+
     <div class="actions">
       <button type="button" id="copy-md">Markdownでコピー</button>
       {% if summary.todos %}<button type="button" id="download-csv">ToDoをCSVで保存</button>{% endif %}
@@ -263,6 +274,16 @@
         function () { status.textContent = "コピーできませんでした"; }
       );
     });
+    var copyEmail = document.getElementById("copy-email");
+    if (copyEmail) {
+      copyEmail.addEventListener("click", function () {
+        var status = document.getElementById("copy-email-status");
+        navigator.clipboard.writeText(document.getElementById("email-draft").value).then(
+          function () { status.textContent = "コピーしました"; },
+          function () { status.textContent = "コピーできませんでした"; }
+        );
+      });
+    }
     var csvButton = document.getElementById("download-csv");
     if (csvButton) {
       csvButton.addEventListener("click", function () {

@@ -1049,3 +1049,50 @@ def test_pruning_survives_a_malformed_row():
 def test_stripe_calls_cannot_hang_for_long():
     assert app_module.stripe.default_http_client._timeout <= 10
     assert app_module.stripe.max_network_retries <= 1
+
+
+# --- Optional follow-up email draft ----------------------------------------------------
+
+
+def test_email_is_requested_only_when_checked(client):
+    ok = fake_message([text_block("OK")])
+    with patch.object(app_module.client.messages, "create", return_value=ok) as create:
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    kwargs = create.call_args.kwargs
+    assert "email" not in kwargs["output_config"]["format"]["schema"]["properties"]
+    assert kwargs["system"] == app_module.SYSTEM_PROMPT
+
+    with patch.object(app_module.client.messages, "create", return_value=ok) as create:
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT, "with_email": "1"})
+    kwargs = create.call_args.kwargs
+    assert "email" in kwargs["output_config"]["format"]["schema"]["required"]
+    assert "メールの下書き" in kwargs["system"]
+
+
+def test_base_schema_is_not_modified_by_email_variant():
+    assert "email" not in app_module.SUMMARY_SCHEMA["properties"]
+    assert "email" not in app_module.SUMMARY_SCHEMA["required"]
+
+
+def test_email_draft_is_shown_and_included_in_markdown(client):
+    data = _json.dumps(
+        {
+            "summary": "s",
+            "decisions": ["年額契約"],
+            "todos": [],
+            "email": "件名: 本日のお打ち合わせのお礼\n\n〇〇様\n\n本日はありがとうございました。",
+        },
+        ensure_ascii=False,
+    )
+    with patch.object(
+        app_module.client.messages, "create", return_value=fake_message([text_block(data)])
+    ):
+        body = client.post(
+            "/", data={"transcript": SAMPLE_TRANSCRIPT, "with_email": "1"}
+        ).data.decode("utf-8")
+    assert 'id="email-draft"' in body
+    assert "件名: 本日のお打ち合わせのお礼" in body
+    assert "checked" in body.split('name="with_email"')[1][:40]  # option stays ticked
+    md = app_module.summary_to_markdown(app_module.parse_summary(data))
+    assert md.endswith("本日はありがとうございました。")
+    assert "## メール下書き" in md
