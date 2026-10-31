@@ -997,3 +997,16 @@ def test_invalid_or_missing_meeting_date_sends_transcript_only(client):
 def test_form_defaults_meeting_date_to_today_in_japan(client):
     today = app_module.datetime.now(app_module.JST).date().isoformat()
     assert f'value="{today}"' in client.get("/").data.decode("utf-8")
+
+
+def test_free_use_ips_from_previous_months_are_deleted(client):
+    import os as _os
+
+    _os.makedirs(app_module.DATA_DIR, exist_ok=True)
+    with open(app_module.FREE_USAGE_FILE, "w", encoding="utf-8") as f:
+        f.write("ip,month,timestamp\n203.0.113.9,2000-01,2000-01-15T00:00:00+00:00\n")
+    app_module.record_free_use("198.51.100.1")
+    with open(app_module.FREE_USAGE_FILE, encoding="utf-8") as f:
+        content = f.read()
+    assert "203.0.113.9" not in content
+    assert "198.51.100.1" in content and content.startswith("ip,month,timestamp")
