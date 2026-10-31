@@ -841,3 +841,35 @@ def test_success_page_offers_copy_and_saves_code_for_tool_page(client):
         body = client.get("/purchase/success?session_id=sess_copy").data.decode("utf-8")
     assert 'id="copy-code"' in body
     assert "gjk_access_code" in body
+
+
+# --- Hardening ------------------------------------------------------------------------
+
+
+def test_security_headers_on_every_page(client):
+    for path in ("/", "/waitlist", "/privacy"):
+        r = client.get(path)
+        assert r.headers["X-Frame-Options"] == "DENY"
+        assert "frame-ancestors 'none'" in r.headers["Content-Security-Policy"]
+        assert r.headers["X-Content-Type-Options"] == "nosniff"
+        assert r.headers["Referrer-Policy"] == "same-origin"
+
+
+def test_success_and_admin_pages_are_not_cached(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "pw")
+    with patch.object(
+        app_module.stripe.checkout.Session,
+        "retrieve",
+        return_value=SimpleNamespace(payment_status="paid"),
+    ):
+        r = client.get("/purchase/success?session_id=sess_cache")
+    assert r.headers["Cache-Control"] == "no-store"
+    assert client.get("/admin", headers=_auth("pw")).headers["Cache-Control"] == "no-store"
+    assert "no-store" not in client.get("/").headers.get("Cache-Control", "")
+
+
+def test_waitlist_ignores_duplicate_email_case_insensitively(client):
+    client.post("/waitlist", data={"email": "Taro@Example.com"})
+    r = client.post("/waitlist", data={"email": "taro@example.com"})
+    assert "申し込みありがとうございます" in r.data.decode("utf-8")  # don't reveal it exists
+    assert len(app_module._read_csv(app_module.WAITLIST_FILE)) == 1

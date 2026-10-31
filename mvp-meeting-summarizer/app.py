@@ -600,6 +600,10 @@ def waitlist():
 
 @_locked
 def append_waitlist(email, role, note):
+    """Add a sign-up; a repeat of an existing email is silently skipped."""
+    stored_email = csv_safe(email)
+    if any(r["email"].lower() == stored_email.lower() for r in _read_csv(WAITLIST_FILE)):
+        return False
     os.makedirs(DATA_DIR, exist_ok=True)
     is_new_file = not os.path.exists(WAITLIST_FILE)
     with open(WAITLIST_FILE, "a", newline="", encoding="utf-8") as f:
@@ -609,11 +613,12 @@ def append_waitlist(email, role, note):
         writer.writerow(
             [
                 datetime.now(timezone.utc).isoformat(),
-                csv_safe(email),
+                stored_email,
                 csv_safe(role),
                 csv_safe(note),
             ]
         )
+    return True
 
 
 def restore_code_for_session(session):
@@ -669,6 +674,23 @@ def purchase_success():
             code = restore_code_for_session(session) or create_and_back_up_code(session_id, session)
 
     return render_template("purchase_success.html", error=None, code=code, uses=PACK_USES)
+
+
+# Pages whose URL or content must not linger in caches: the success page URL
+# carries the Stripe session ID that reveals the access code.
+NO_STORE_PREFIXES = ("/purchase/success", "/admin")
+
+
+@app.after_request
+def security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    # No framing: stops click-jacking of the access-code form and admin page.
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    if request.path.startswith(NO_STORE_PREFIXES):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.errorhandler(413)
