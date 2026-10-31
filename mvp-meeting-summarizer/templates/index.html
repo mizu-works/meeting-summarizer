@@ -2,7 +2,14 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>議事録要約・タスク抽出ツール(MVP)</title>
+  <meta name="description" content="Zoomの文字起こしや面談メモを貼るだけで、要約・決定事項・ToDo(担当者・期限つき)を自動で抽出。録音機能なし・入力テキストは保存しないので、守秘義務のある面談でも使いやすい設計です。">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="議事録要約・タスク抽出ツール">
+  <meta property="og:description" content="文字起こしを貼るだけで、要約と「誰がいつまでに何をやるか」が分かる。">
+  <meta property="og:url" content="{{ request.url_root }}">
+  <meta name="twitter:card" content="summary">
   <style>
     body { font-family: sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; color: #222; }
     h1 { font-size: 1.4rem; }
@@ -12,8 +19,39 @@
     .error { color: #b00020; margin-top: 12px; }
     .note { color: #666; font-size: 0.85rem; margin-top: 8px; }
     .quota { color: #1a5fb4; font-size: 0.85rem; margin-top: 4px; }
+    .example { margin: 8px 0 16px; }
+    .example > summary { cursor: pointer; color: #1a5fb4; font-size: 0.9rem; }
+    .example-input { white-space: pre-wrap; background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px; font-size: 0.85rem; font-family: inherit; }
+    .example .summary { margin-top: 8px; }
+    .option { display: block; margin-top: 12px; font-size: 0.95rem; }
+    .email-draft { height: 260px; background: #fff; font-size: 0.9rem; line-height: 1.6; }
+    #copy-email { margin-top: 6px; padding: 6px 14px; font-size: 0.9rem; }
+    .meeting-date { margin-top: 12px; }
+    .meeting-date input { padding: 5px; font-size: 0.9rem; }
+    .meeting-date .note { display: block; margin-top: 2px; }
     .access-code { margin-top: 12px; }
-    .access-code input { padding: 6px; font-size: 0.9rem; width: 200px; }
+    .below-textarea { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    .file-pick { font-size: 0.85rem; color: #1a5fb4; cursor: pointer; text-decoration: underline; }
+    .file-pick input { display: none; }
+    .hint { margin-top: 4px; }
+    .char-count { font-size: 0.8rem; color: #666; margin-left: auto; }
+    .char-count.over { color: #b00020; font-weight: bold; }
+    .remember { display: inline-block; font-size: 0.85rem; color: #444; margin-left: 8px; white-space: nowrap; }
+    .progress { margin-left: 12px; font-size: 0.85rem; color: #1a5fb4; }
+    button:disabled { cursor: wait; opacity: 0.7; }
+    .access-code input[type=text] { padding: 6px; font-size: 0.9rem; width: 200px; }
+    .summary { background: #f6f6f6; padding: 8px 16px 16px; border-radius: 8px; margin-top: 24px; line-height: 1.6; }
+    .summary h2 { font-size: 1.05rem; margin: 16px 0 6px; }
+    .summary-text { white-space: pre-wrap; margin: 0; }
+    .summary .empty { color: #666; margin: 0; }
+    table.todos { width: 100%; border-collapse: collapse; background: #fff; font-size: 0.92rem; }
+    table.todos th, table.todos td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
+    table.todos th { background: #eee; font-weight: normal; color: #444; }
+    table.todos td:first-child, table.todos th:first-child { width: 28px; text-align: center; }
+    table.todos td:nth-child(3), table.todos td:nth-child(4), table.todos th { white-space: nowrap; }
+    table.todos tr:has(input:checked) td:not(:first-child) { text-decoration: line-through; color: #888; }
+    .actions { margin-top: 12px; }
+    .actions button { margin: 0 8px 0 0; padding: 6px 14px; font-size: 0.9rem; }
     footer { margin-top: 40px; font-size: 0.8rem; color: #888; }
     footer a { color: #888; }
   </style>
@@ -28,21 +66,262 @@
     無料枠: 今月あと{{ remaining_free }}/{{ free_limit }}回利用できます。
     それ以上使いたい方は<a href="/waitlist">早期アクセス申し込み</a>からアクセスコードをご購入ください。
   </p>
-  <form method="post">
-    <textarea name="transcript" placeholder="Zoomの文字起こしや面談メモをここに貼り付けてください">{{ transcript }}</textarea>
-    <br>
-    <div class="access-code">
-      <label for="access_code">アクセスコード(お持ちの方のみ):</label><br>
-      <input type="text" id="access_code" name="access_code" value="{{ access_code }}" placeholder="GJK-XXXXXXXX">
+  {% if not result %}
+  <details class="example">
+    <summary>出力例を見る(無料枠は使いません)</summary>
+    <p class="note">こんな文字起こしを貼ると…</p>
+    <pre class="example-input" id="example-transcript">田中(営業): 見積書は今週金曜までにメールでお送りします。
+山本(先方): ありがとうございます。稟議は来週中に回して、結果は月末までにご連絡します。
+佐藤(田中の上司): 導入スケジュール案は私が作って、来週水曜にお送りします。
+山本: では年額契約の方向で進めましょう。</pre>
+    <p class="note">…このように整理されます。</p>
+    <div class="summary">
+      <h2>要約</h2>
+      <p class="summary-text">勤怠管理システム導入の商談。先方は年額契約の方向で合意し、見積書の送付後に社内稟議を行う。</p>
+      <h2>決定事項</h2>
+      <ul><li>年額契約の方向で進める</li></ul>
+      <h2>ToDo(3件)</h2>
+      <table class="todos">
+        <thead><tr><th></th><th>やること</th><th>担当</th><th>期限</th></tr></thead>
+        <tbody>
+          <tr><td><input type="checkbox" aria-label="完了"></td><td>見積書をメールで送付する</td><td>田中</td><td>今週金曜</td></tr>
+          <tr><td><input type="checkbox" aria-label="完了"></td><td>社内稟議を回し、結果を連絡する</td><td>山本</td><td>月末</td></tr>
+          <tr><td><input type="checkbox" aria-label="完了"></td><td>導入スケジュール案を送付する</td><td>佐藤</td><td>来週水曜</td></tr>
+        </tbody>
+      </table>
     </div>
-    <button type="submit">要約・タスク抽出する</button>
-  </form>
-
-  {% if error %}
-  <div class="error">{{ error }}</div>
+    <button type="button" id="use-example">この文字起こしで試してみる</button>
+  </details>
   {% endif %}
 
-  {% if result %}
+  <form method="post" id="summarize-form">
+    <textarea name="transcript" id="transcript" placeholder="Zoomの文字起こしや面談メモをここに貼り付けてください">{{ transcript }}</textarea>
+    <div class="below-textarea">
+      <label class="file-pick">ファイルから読み込む(.txt / .vtt / .srt)
+        <input type="file" id="file-input" accept=".txt,.vtt,.srt,text/plain,text/vtt">
+      </label>
+      <span class="char-count" id="char-count" data-max="{{ max_chars }}"></span>
+    </div>
+    <p class="note hint">ZoomやTeamsの字幕ファイル(.vtt)は、タイムスタンプを自動で取り除いてから要約します。</p>
+    <div class="meeting-date">
+      <label for="meeting_date">会議の日付:</label>
+      <input type="date" id="meeting_date" name="meeting_date" value="{{ meeting_date }}">
+      <span class="note">「来週金曜」などの期限を、この日を基準に日付へ直します</span>
+    </div>
+    <label class="option"><input type="checkbox" name="with_email" value="1"{% if with_email %} checked{% endif %}> お礼・確認メールの下書きも作る</label>
+    <div class="access-code">
+      <label for="access_code">アクセスコード(お持ちの方のみ):</label><br>
+      <input type="text" id="access_code" name="access_code" value="{{ access_code }}" placeholder="GJK-XXXXXXXX" autocomplete="off">
+      <label class="remember"><input type="checkbox" id="remember-code"> このブラウザに保存する</label>
+    </div>
+    <button type="submit" id="submit-button">要約・タスク抽出する</button>
+    <span class="progress" id="progress" role="status" aria-live="polite" hidden>処理中です。長い文字起こしだと1分ほどかかることがあります…</span>
+  </form>
+  <script>
+    (function () {
+      var form = document.getElementById("summarize-form");
+      var textarea = document.getElementById("transcript");
+      var counter = document.getElementById("char-count");
+      var button = document.getElementById("submit-button");
+      var codeInput = document.getElementById("access_code");
+      var remember = document.getElementById("remember-code");
+      var max = parseInt(counter.dataset.max, 10);
+      var STORAGE_KEY = "gjk_access_code";
+      var elapsedTimer = null;
+
+      function updateCount() {
+        var n = textarea.value.length;
+        counter.textContent = n.toLocaleString() + " / " + max.toLocaleString() + "文字";
+        counter.classList.toggle("over", n > max);
+      }
+      textarea.addEventListener("input", updateCount);
+      updateCount();
+
+      var useExample = document.getElementById("use-example");
+      if (useExample) {
+        useExample.addEventListener("click", function () {
+          textarea.value = document.getElementById("example-transcript").textContent;
+          updateCount();
+          textarea.focus();
+          textarea.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+      }
+
+      // Subtitle files shrink a lot once the server strips timestamps,
+      // so only plain text is held to the limit here.
+      function looksLikeSubtitles(text) {
+        return /\d{1,2}:\d{2}[.,]\d{1,3}\s*-->/.test(text);
+      }
+
+      document.getElementById("file-input").addEventListener("change", function (e) {
+        var file = e.target.files[0];
+        if (!file) return;
+        file.arrayBuffer().then(function (buf) {
+          var text;
+          try {
+            text = new TextDecoder("utf-8", { fatal: true }).decode(buf);
+          } catch (err) {
+            // Notepad on Japanese Windows often saves as Shift_JIS
+            text = new TextDecoder("shift_jis").decode(buf);
+          }
+          textarea.value = text.replace(/^\ufeff/, "");
+          updateCount();
+        });
+      });
+
+      // Storage can throw in private mode; the form must work without it.
+      try {
+        var saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          remember.checked = true;
+          if (!codeInput.value) codeInput.value = saved;
+        }
+      } catch (e) {}
+
+      form.addEventListener("submit", function (e) {
+        // A second click would send a second request and use up a second try.
+        if (button.disabled) { e.preventDefault(); return; }
+        if (textarea.value.length > max && !looksLikeSubtitles(textarea.value)) {
+          e.preventDefault();
+          counter.classList.add("over");
+          textarea.focus();
+          return;
+        }
+        try {
+          if (remember.checked && codeInput.value.trim()) {
+            localStorage.setItem(STORAGE_KEY, codeInput.value.trim());
+          } else {
+            localStorage.removeItem(STORAGE_KEY);
+          }
+        } catch (e) {}
+        button.disabled = true;
+        button.textContent = "処理中…";
+        document.getElementById("progress").hidden = false;
+        var started = Date.now();
+        elapsedTimer = setInterval(function () {
+          button.textContent = "処理中…(" + Math.round((Date.now() - started) / 1000) + "秒)";
+        }, 1000);
+      });
+
+      // Coming back via the browser's back button restores a disabled button from cache.
+      window.addEventListener("pageshow", function () {
+        clearInterval(elapsedTimer);
+        button.disabled = false;
+        button.textContent = "要約・タスク抽出する";
+        document.getElementById("progress").hidden = true;
+      });
+    })();
+  </script>
+
+  {% if error %}
+  <div class="error" role="alert">{{ error }}</div>
+  {% endif %}
+
+  {% if summary %}
+  <div class="summary">
+    <h2>要約</h2>
+    <p class="summary-text">{{ summary.summary }}</p>
+
+    <h2>決定事項</h2>
+    {% if summary.decisions %}
+    <ul>
+      {% for d in summary.decisions %}<li>{{ d }}</li>{% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty">特になし</p>
+    {% endif %}
+
+    <h2>ToDo({{ summary.todos|length }}件)</h2>
+    {% if summary.todos %}
+    <table class="todos">
+      <thead><tr><th></th><th>やること</th><th>担当</th><th>期限</th></tr></thead>
+      <tbody>
+        {% for t in summary.todos %}
+        <tr>
+          <td><input type="checkbox" aria-label="完了"></td>
+          <td>{{ t.task }}</td>
+          <td>{{ t.owner or "未定" }}</td>
+          <td>{{ t.due or "未定" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty">特になし</p>
+    {% endif %}
+
+    {% if summary.email %}
+    <h2>メール下書き</h2>
+    <textarea class="email-draft" id="email-draft" readonly>{{ summary.email }}</textarea>
+    <button type="button" id="copy-email">メールをコピー</button>
+    <span id="copy-email-status" class="note"></span>
+    {% endif %}
+
+    <div class="actions">
+      <button type="button" id="copy-md">Markdownでコピー</button>
+      {% if summary.todos %}<button type="button" id="download-csv">ToDoをCSVで保存</button>{% endif %}
+      {% if ics %}<button type="button" id="download-ics" title="Googleカレンダー・Outlook・iPhoneのカレンダーに読み込めます">期限をカレンダーに追加(.ics)</button>{% endif %}
+      <span id="copy-status" class="note"></span>
+    </div>
+  </div>
+  <script id="result-markdown" type="application/json">{{ result|tojson }}</script>
+  <script id="todos-data" type="application/json">{{ summary.todos|tojson }}</script>
+  {% if ics %}<script id="ics-data" type="application/json">{{ ics|tojson }}</script>{% endif %}
+  <script>
+    document.getElementById("copy-md").addEventListener("click", function () {
+      var text = JSON.parse(document.getElementById("result-markdown").textContent);
+      var status = document.getElementById("copy-status");
+      navigator.clipboard.writeText(text).then(
+        function () { status.textContent = "コピーしました"; },
+        function () { status.textContent = "コピーできませんでした"; }
+      );
+    });
+    var copyEmail = document.getElementById("copy-email");
+    if (copyEmail) {
+      copyEmail.addEventListener("click", function () {
+        var status = document.getElementById("copy-email-status");
+        navigator.clipboard.writeText(document.getElementById("email-draft").value).then(
+          function () { status.textContent = "コピーしました"; },
+          function () { status.textContent = "コピーできませんでした"; }
+        );
+      });
+    }
+    function downloadText(text, filename, type) {
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([text], { type: type }));
+      a.download = filename;
+      a.click();
+      // Revoking right away can cancel the download in some browsers.
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    }
+    var icsButton = document.getElementById("download-ics");
+    if (icsButton) {
+      icsButton.addEventListener("click", function () {
+        var ics = JSON.parse(document.getElementById("ics-data").textContent);
+        downloadText(ics, "todo.ics", "text/calendar;charset=utf-8");
+      });
+    }
+    var csvButton = document.getElementById("download-csv");
+    if (csvButton) {
+      csvButton.addEventListener("click", function () {
+        var todos = JSON.parse(document.getElementById("todos-data").textContent);
+        var cell = function (v) {
+          v = String(v);
+          // Excel runs cells starting with these as formulas; the text comes
+          // from the pasted transcript, so neutralize them like the server does.
+          if (/^[=+\-@\t\r]/.test(v)) v = "'" + v;
+          return '"' + v.replace(/"/g, '""') + '"';
+        };
+        var rows = [["やること", "担当", "期限"]].concat(
+          todos.map(function (t) { return [t.task, t.owner, t.due]; })
+        );
+        var csv = rows.map(function (r) { return r.map(cell).join(","); }).join("\r\n");
+        // BOM so Excel opens the Japanese text correctly
+        downloadText("\ufeff" + csv, "todo.csv", "text/csv;charset=utf-8");
+      });
+    }
+  </script>
+  {% elif result %}
   <div class="result">{{ result }}</div>
   {% endif %}
 
