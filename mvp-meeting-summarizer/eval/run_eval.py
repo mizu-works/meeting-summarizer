@@ -1,7 +1,7 @@
 """Run the summarizer against sample transcripts and check the output.
 
-This calls the real Claude API with the exact prompt, schema and model the
-app uses (app.summarize), so it costs money: one full run of all cases is
+This calls the real Claude API through the same steps as the app
+(app.clean_transcript, then app.summarize), so it costs money: one full run of all cases is
 roughly 7 requests (a few cents). Run it before changing SYSTEM_PROMPT,
 SUMMARY_SCHEMA or MODEL, and compare the pass rate before and after.
 
@@ -120,7 +120,9 @@ def main():
             total += 1
             started = time.time()
             try:
-                summary, _, error, message = app.summarize(case["transcript"])
+                summary, _, error, message = app.summarize(
+                    app.clean_transcript(case["transcript"]).strip()
+                )
             except Exception as e:  # report and keep going
                 summary, error, message = None, f"{type(e).__name__}: {e}", None
             elapsed = time.time() - started
