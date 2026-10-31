@@ -363,6 +363,8 @@ SYSTEM_PROMPT = """あなたは商談・面談の文字起こしから重要情�
   - task: 何をするか(「〜する」で終わる短い文)
   - owner: 担当者。本文から分からなければ空文字
   - due: 期限。本文の表現のまま(例: 「来週金曜」「10/31」)。分からなければ空文字
+    入力の先頭に会議の日付があり、期限が「明日」「来週金曜」「月末」のような相対的な表現なら、
+    会議の日付を基準にした具体的な日付を「来週金曜(11/6)」のように括弧で添える
   ToDoがなければ空配列
 
 本文に書かれていない担当者や期限を推測で埋めないでください。
@@ -434,7 +436,27 @@ def output_config():
     return config
 
 
-def summarize(transcript):
+JST = timezone(timedelta(hours=9))
+WEEKDAYS_JA = "月火水木金土日"
+
+
+def parse_meeting_date(value):
+    try:
+        return datetime.strptime((value or "").strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def build_user_content(transcript, meeting_date=None):
+    if meeting_date is None:
+        return transcript
+    # The weekday is spelled out so the model doesn't have to work it out
+    # before counting to "来週金曜".
+    label = f"{meeting_date:%Y-%m-%d}({WEEKDAYS_JA[meeting_date.weekday()]})"
+    return f"会議の日付: {label}\n\n文字起こし:\n{transcript}"
+
+
+def summarize(transcript, meeting_date=None):
     """Call Claude and return (summary, markdown, error, message).
 
     summary is None when the output wasn't the expected JSON; markdown then
@@ -446,7 +468,7 @@ def summarize(transcript):
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": transcript}],
+        messages=[{"role": "user", "content": build_user_content(transcript, meeting_date)}],
         output_config=output_config(),
     )
     text_blocks = [block.text for block in message.content if block.type == "text"]
@@ -506,11 +528,13 @@ def index():
     error = None
     transcript = ""
     access_code = ""
+    meeting_date = datetime.now(JST).date()
     remaining_free = FREE_MONTHLY_LIMIT - count_free_uses_this_month(get_client_ip())
 
     if request.method == "POST":
         transcript = clean_transcript(request.form.get("transcript", "")).strip()
         access_code = request.form.get("access_code", "").strip()
+        meeting_date = parse_meeting_date(request.form.get("meeting_date"))
         ip = get_client_ip()
 
         if not transcript:
@@ -544,7 +568,7 @@ def index():
                 started = time.monotonic()
                 message = None
                 try:
-                    summary, result, error, message = summarize(transcript)
+                    summary, result, error, message = summarize(transcript, meeting_date)
                 except Exception:
                     error = "処理中にエラーが発生しました。時間をおいて再度お試しください。"
                 log_usage(
@@ -569,6 +593,7 @@ def index():
         error=error,
         transcript=transcript,
         access_code=access_code,
+        meeting_date=meeting_date.isoformat() if meeting_date else "",
         remaining_free=max(remaining_free, 0),
         free_limit=FREE_MONTHLY_LIMIT,
         max_chars=MAX_TRANSCRIPT_CHARS,

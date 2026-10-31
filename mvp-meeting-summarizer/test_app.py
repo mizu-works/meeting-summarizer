@@ -970,3 +970,30 @@ def test_success_page_restores_code_from_payment_intent_without_search(
     assert "GJK-HOOKED01" in body
     no_real_stripe_calls.search.assert_not_called()
     assert app_module.find_access_code_row("GJK-HOOKED01")["remaining_uses"] == "9"
+
+
+# --- Meeting date for resolving relative deadlines -------------------------------------
+
+
+def test_meeting_date_with_weekday_is_sent_to_model(client):
+    with patch.object(
+        app_module.client.messages, "create", return_value=fake_message([text_block("OK")])
+    ) as create:
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT, "meeting_date": "2026-10-30"})
+    content = create.call_args.kwargs["messages"][0]["content"]
+    assert content.startswith("会議の日付: 2026-10-30(金)\n")
+    assert content.endswith(SAMPLE_TRANSCRIPT)
+
+
+def test_invalid_or_missing_meeting_date_sends_transcript_only(client):
+    for value in ("", "2026-13-40", "来週"):
+        with patch.object(
+            app_module.client.messages, "create", return_value=fake_message([text_block("OK")])
+        ) as create:
+            client.post("/", data={"transcript": SAMPLE_TRANSCRIPT, "meeting_date": value})
+        assert create.call_args.kwargs["messages"][0]["content"] == SAMPLE_TRANSCRIPT
+
+
+def test_form_defaults_meeting_date_to_today_in_japan(client):
+    today = app_module.datetime.now(app_module.JST).date().isoformat()
+    assert f'value="{today}"' in client.get("/").data.decode("utf-8")

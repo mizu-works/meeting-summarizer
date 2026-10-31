@@ -23,6 +23,9 @@
     .example > summary { cursor: pointer; color: #1a5fb4; font-size: 0.9rem; }
     .example-input { white-space: pre-wrap; background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px; font-size: 0.85rem; font-family: inherit; }
     .example .summary { margin-top: 8px; }
+    .meeting-date { margin-top: 12px; }
+    .meeting-date input { padding: 5px; font-size: 0.9rem; }
+    .meeting-date .note { display: block; margin-top: 2px; }
     .access-code { margin-top: 12px; }
     .below-textarea { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
     .file-pick { font-size: 0.85rem; color: #1a5fb4; cursor: pointer; text-decoration: underline; }
@@ -97,6 +100,11 @@
       <span class="char-count" id="char-count" data-max="{{ max_chars }}"></span>
     </div>
     <p class="note hint">ZoomやTeamsの字幕ファイル(.vtt)は、タイムスタンプを自動で取り除いてから要約します。</p>
+    <div class="meeting-date">
+      <label for="meeting_date">会議の日付:</label>
+      <input type="date" id="meeting_date" name="meeting_date" value="{{ meeting_date }}">
+      <span class="note">「来週金曜」などの期限を、この日を基準に日付へ直します</span>
+    </div>
     <div class="access-code">
       <label for="access_code">アクセスコード(お持ちの方のみ):</label><br>
       <input type="text" id="access_code" name="access_code" value="{{ access_code }}" placeholder="GJK-XXXXXXXX" autocomplete="off">
