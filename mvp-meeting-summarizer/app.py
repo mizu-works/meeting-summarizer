@@ -8,9 +8,8 @@ import string
 import threading
 import time
 from collections import Counter
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
-from datetime import datetime, timezone
 
 import stripe
 from anthropic import Anthropic
@@ -27,6 +26,11 @@ app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
 # reserved use is given back.
 client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"), timeout=120.0, max_retries=1)
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
+# Issuing a code calls Stripe while holding DATA_LOCK (so two codes are never
+# minted), so a hung Stripe call would stall every request. The library default
+# is 80s with 2 retries; cap it at about 20s in total.
+stripe.default_http_client = stripe.new_default_http_client(timeout=10)
+stripe.max_network_retries = 1
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 WAITLIST_FILE = os.path.join(DATA_DIR, "waitlist.csv")
@@ -112,7 +116,7 @@ def _drop_previous_months(month_key):
         return
     with open(FREE_USAGE_FILE, newline="", encoding="utf-8") as f:
         rows = list(csv.reader(f))
-    if len(rows) < 2 or rows[1][1] == month_key:
+    if len(rows) < 2 or (len(rows[1]) >= 2 and rows[1][1] == month_key):
         return
     kept = [rows[0]] + [r for r in rows[1:] if len(r) >= 2 and r[1] == month_key]
     with open(FREE_USAGE_FILE, "w", newline="", encoding="utf-8") as f:
@@ -515,8 +519,16 @@ def _outcome(message, result, summary):
     return "ok" if summary else "unparsed"
 
 
-@_locked
 def log_usage(plan, chars, seconds, outcome, message=None):
+    """Never raises: a failed log write must not cost the user their result."""
+    try:
+        _write_usage_row(plan, chars, seconds, outcome, message)
+    except Exception:
+        app.logger.exception("Failed to write usage log")
+
+
+@_locked
+def _write_usage_row(plan, chars, seconds, outcome, message):
     usage = getattr(message, "usage", None)
     os.makedirs(DATA_DIR, exist_ok=True)
     is_new_file = not os.path.exists(USAGE_LOG_FILE)
@@ -701,6 +713,8 @@ def ensure_code_for_session(session_id, session):
 
 
 PAID_EVENTS = ("checkout.session.completed", "checkout.session.async_payment_succeeded")
+# "no_payment_required" is a checkout made free by a 100% coupon (e.g. for testers).
+PAID_STATUSES = ("paid", "no_payment_required")
 
 
 @app.route("/stripe/webhook", methods=["POST"])
@@ -719,7 +733,7 @@ def stripe_webhook():
         return "invalid signature", 400
     if event.type in PAID_EVENTS:
         session = event.data.object
-        if getattr(session, "payment_status", None) == "paid":
+        if getattr(session, "payment_status", None) in PAID_STATUSES:
             ensure_code_for_session(session.id, session)
     return "", 200
 
@@ -741,7 +755,7 @@ def purchase_success():
             code=None,
         )
 
-    if session.payment_status != "paid":
+    if session.payment_status not in PAID_STATUSES:
         return render_template(
             "purchase_success.html", error="お支払いが完了していません。", code=None
         )
