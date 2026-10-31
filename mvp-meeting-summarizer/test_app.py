@@ -657,3 +657,58 @@ def test_new_codes_are_not_lost_while_others_are_redeemed(client):
     _run_concurrently(mixed, 40)
     for c in created:
         assert app_module.find_access_code_row(c) is not None
+
+
+def _slow_ok(**kwargs):
+    import time as _time
+
+    _time.sleep(0.2)  # keep requests overlapping
+    return fake_message([text_block("OK")])
+
+
+def test_parallel_free_requests_cannot_exceed_monthly_limit():
+    """Several tabs submitted at once must not all slip under the limit."""
+    app_module.app.config["TESTING"] = True
+
+    def post():
+        c = app_module.app.test_client()
+        return "OK" in c.post("/", data={"transcript": SAMPLE_TRANSCRIPT}).data.decode("utf-8")
+
+    with patch.object(app_module.client.messages, "create", side_effect=_slow_ok):
+        results = _run_concurrently(post, 12)
+    assert results.count(True) == app_module.FREE_MONTHLY_LIMIT
+    assert app_module.count_free_uses_this_month("127.0.0.1") == app_module.FREE_MONTHLY_LIMIT
+
+
+def test_parallel_code_requests_cannot_exceed_purchased_uses():
+    app_module.app.config["TESTING"] = True
+    code = app_module.create_access_code("sess_par", uses=2)
+
+    def post():
+        c = app_module.app.test_client()
+        r = c.post("/", data={"transcript": SAMPLE_TRANSCRIPT, "access_code": code})
+        return "OK" in r.data.decode("utf-8")
+
+    with patch.object(app_module.client.messages, "create", side_effect=_slow_ok):
+        results = _run_concurrently(post, 6)
+    assert results.count(True) == 2
+    assert app_module.find_access_code_row(code)["remaining_uses"] == "0"
+
+
+def test_reserved_free_use_is_released_on_failure_without_touching_others(client):
+    with patch.object(app_module.client.messages, "create", return_value=fake_message([text_block("OK")])):
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    with patch.object(app_module.client.messages, "create", side_effect=RuntimeError("boom")):
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    assert app_module.count_free_uses_this_month("127.0.0.1") == 1
+
+
+def test_code_use_is_refunded_when_response_is_truncated(client):
+    code = app_module.create_access_code("sess_trunc", uses=3)
+    with patch.object(
+        app_module.client.messages,
+        "create",
+        return_value=fake_message([text_block("{")], stop_reason="max_tokens"),
+    ):
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT, "access_code": code})
+    assert app_module.find_access_code_row(code)["remaining_uses"] == "3"
