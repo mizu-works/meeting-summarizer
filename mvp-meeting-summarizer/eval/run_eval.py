@@ -89,6 +89,16 @@ def check(summary, checks):
         if not any(k in d for d in decisions for k in group):
             fails.append(f"期待した決定事項がない: {group}")
 
+    email = summary.get("email", "")
+    if (checks.get("email_must_contain") or checks.get("email_must_not_contain")) and not email:
+        fails.append("メール下書きがない")
+    for group in checks.get("email_must_contain", []):
+        if email and not any(k in email for k in group):
+            fails.append(f"メールに期待した内容がない: {group}")
+    for s in checks.get("email_must_not_contain", []):
+        if s in email:
+            fails.append(f"メールに本文にない内容「{s}」がある")
+
     dumped = json.dumps(summary, ensure_ascii=False)
     for s in checks.get("output_must_not_contain", []):
         if s in dumped:
@@ -127,6 +137,7 @@ def main():
                 summary, _, error, message = app.summarize(
                     app.clean_transcript(case["transcript"]).strip(),
                     app.parse_meeting_date(case.get("meeting_date")),
+                    case.get("with_email", False),
                 )
             except Exception as e:  # report and keep going
                 summary, error, message = None, f"{type(e).__name__}: {e}", None

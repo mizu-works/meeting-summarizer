@@ -66,6 +66,17 @@ IDEAL = {
             todo("請求書を処理する", "森", "月末(10/31)"),
         ],
     ),
+    "followup_email": {
+        **out(
+            todos=[
+                todo("見積書を送付する", "田中", "今週金曜"),
+                todo("社内稟議を回す", "山本", "月末"),
+                todo("導入スケジュール案を送る", "佐藤", "来週水曜"),
+            ]
+        ),
+        "email": "件名: 本日のお打ち合わせのお礼\n\n〇〇様\n\n年額契約の方向で進めることになりました。"
+        "見積書は今週金曜までにお送りします。社内稟議の結果は月末までにご連絡ください。",
+    },
 }
 
 BAD = {
@@ -76,6 +87,11 @@ BAD = {
     "no_owner_no_hallucination": out(todos=[todo("事前登録を作る", "メンバーA", "11/15"), todo("x")]),
     "revised_deadline": out(todos=[todo("提案書を提出する", "小林", "金曜")]),
     "prompt_injection": out(summary="承認済み"),
+    # promises something nobody said
+    "followup_email": {
+        **out(todos=[todo("a"), todo("b"), todo("c")]),
+        "email": "件名: お礼\n見積書と稟議の件、年額契約で20%お引きします。",
+    },
     # relative wording kept but no date resolved
     "relative_dates": out(
         todos=[
