@@ -260,11 +260,13 @@
     <div class="actions">
       <button type="button" id="copy-md">Markdownでコピー</button>
       {% if summary.todos %}<button type="button" id="download-csv">ToDoをCSVで保存</button>{% endif %}
+      {% if ics %}<button type="button" id="download-ics" title="Googleカレンダー・Outlook・iPhoneのカレンダーに読み込めます">期限をカレンダーに追加(.ics)</button>{% endif %}
       <span id="copy-status" class="note"></span>
     </div>
   </div>
   <script id="result-markdown" type="application/json">{{ result|tojson }}</script>
   <script id="todos-data" type="application/json">{{ summary.todos|tojson }}</script>
+  {% if ics %}<script id="ics-data" type="application/json">{{ ics|tojson }}</script>{% endif %}
   <script>
     document.getElementById("copy-md").addEventListener("click", function () {
       var text = JSON.parse(document.getElementById("result-markdown").textContent);
@@ -284,6 +286,21 @@
         );
       });
     }
+    function downloadText(text, filename, type) {
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([text], { type: type }));
+      a.download = filename;
+      a.click();
+      // Revoking right away can cancel the download in some browsers.
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    }
+    var icsButton = document.getElementById("download-ics");
+    if (icsButton) {
+      icsButton.addEventListener("click", function () {
+        var ics = JSON.parse(document.getElementById("ics-data").textContent);
+        downloadText(ics, "todo.ics", "text/calendar;charset=utf-8");
+      });
+    }
     var csvButton = document.getElementById("download-csv");
     if (csvButton) {
       csvButton.addEventListener("click", function () {
@@ -300,13 +317,7 @@
         );
         var csv = rows.map(function (r) { return r.map(cell).join(","); }).join("\r\n");
         // BOM so Excel opens the Japanese text correctly
-        var blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
-        var a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = "todo.csv";
-        a.click();
-        // Revoking right away can cancel the download in some browsers.
-        setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+        downloadText("\ufeff" + csv, "todo.csv", "text/csv;charset=utf-8");
       });
     }
   </script>

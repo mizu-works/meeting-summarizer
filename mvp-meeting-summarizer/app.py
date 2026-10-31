@@ -501,6 +501,84 @@ def build_user_content(transcript, meeting_date=None):
     return f"会議の日付: {label}\n\n文字起こし:\n{transcript}"
 
 
+DUE_DATE_PATTERNS = [
+    re.compile(r"(?P<y>\d{4})[/\-年](?P<m>\d{1,2})[/\-月](?P<d>\d{1,2})"),
+    re.compile(r"(?<!\d)(?P<m>\d{1,2})/(?P<d>\d{1,2})(?!\d)"),
+    re.compile(r"(?<!\d)(?P<m>\d{1,2})月(?P<d>\d{1,2})日"),
+]
+
+
+def parse_due_date(due, reference):
+    """Pull a calendar date out of a due string like "来週金曜(11/6)".
+
+    Without a year, the date is placed in the reference (meeting) date's year,
+    or the next year when that would put it more than a month in the past
+    (a December meeting saying "1/10").
+    """
+    for pattern in DUE_DATE_PATTERNS:
+        m = pattern.search(due or "")
+        if not m:
+            continue
+        parts = m.groupdict()
+        year = int(parts["y"]) if parts.get("y") else reference.year
+        try:
+            date = datetime(year, int(parts["m"]), int(parts["d"])).date()
+        except ValueError:
+            return None
+        if not parts.get("y") and date < reference - timedelta(days=31):
+            try:
+                date = date.replace(year=year + 1)
+            except ValueError:  # Feb 29
+                return None
+        return date
+    return None
+
+
+def _ics_escape(text):
+    return (
+        text.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+    )
+
+
+def _ics_fold(line):
+    """Fold to 75 octets per line (RFC 5545) without splitting a UTF-8 character."""
+    out, current = [], ""
+    for ch in line:
+        limit = 75 if not out else 74  # continuation lines start with a space
+        if len((current + ch).encode("utf-8")) > limit:
+            out.append(current)
+            current = ch
+        else:
+            current += ch
+    out.append(current)
+    return "\r\n ".join(out)
+
+
+def todos_to_ics(todos, reference):
+    """An .ics with one all-day event per ToDo that has a date, or None."""
+    events = []
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for todo in todos:
+        date = parse_due_date(todo["due"], reference)
+        if date is None:
+            continue
+        title = f"【ToDo】{todo['task']}" + (f"({todo['owner']})" if todo["owner"] else "")
+        events += [
+            "BEGIN:VEVENT",
+            f"UID:{secrets.token_hex(8)}@gijiroku-ai",
+            f"DTSTAMP:{stamp}",
+            f"DTSTART;VALUE=DATE:{date:%Y%m%d}",
+            f"DTEND;VALUE=DATE:{date + timedelta(days=1):%Y%m%d}",
+            f"SUMMARY:{_ics_escape(title)}",
+            f"DESCRIPTION:{_ics_escape('期限: ' + todo['due'])}",
+            "END:VEVENT",
+        ]
+    if not events:
+        return None
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//gijiroku-ai//ToDo//JA", *events, "END:VCALENDAR"]
+    return "\r\n".join(_ics_fold(line) for line in lines) + "\r\n"
+
+
 def summarize(transcript, meeting_date=None, with_email=False):
     """Call Claude and return (summary, markdown, error, message).
 
@@ -651,6 +729,9 @@ def index():
         transcript=transcript,
         access_code=access_code,
         meeting_date=meeting_date.isoformat() if meeting_date else "",
+        ics=todos_to_ics(summary["todos"], meeting_date or datetime.now(JST).date())
+        if summary
+        else None,
         with_email=with_email,
         remaining_free=max(remaining_free, 0),
         free_limit=FREE_MONTHLY_LIMIT,

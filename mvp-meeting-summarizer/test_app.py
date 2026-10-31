@@ -1103,3 +1103,70 @@ def test_new_codes_avoid_look_alike_characters():
         code = app_module.generate_access_code()
         assert app_module.ACCESS_CODE_PATTERN.match(code)
         assert not set(code[4:]) & set("0O1I")
+
+
+# --- Calendar (.ics) export -------------------------------------------------------------
+
+from datetime import date as _date
+
+
+@pytest.mark.parametrize(
+    "due, expected",
+    [
+        ("来週金曜(11/6)", _date(2026, 11, 6)),
+        ("月末(10/31)", _date(2026, 10, 31)),
+        ("12月3日", _date(2026, 12, 3)),
+        ("2027/1/15", _date(2027, 1, 15)),
+        ("1/10", _date(2027, 1, 10)),  # already well past this year -> next year
+        ("10/1", _date(2026, 10, 1)),  # a few weeks ago stays this year
+        ("未定", None),
+        ("", None),
+        ("13/40", None),
+        ("100/200", None),
+    ],
+)
+def test_parse_due_date(due, expected):
+    assert app_module.parse_due_date(due, _date(2026, 10, 30)) == expected
+
+
+def test_ics_has_one_all_day_event_per_dated_todo():
+    todos = [
+        {"task": "見積書を送る, 確認;する", "owner": "田中", "due": "来週金曜(11/6)"},
+        {"task": "担当を決める", "owner": "", "due": "未定"},
+    ]
+    ics = app_module.todos_to_ics(todos, _date(2026, 10, 30))
+    assert ics.count("BEGIN:VEVENT") == 1
+    assert "DTSTART;VALUE=DATE:20261106" in ics and "DTEND;VALUE=DATE:20261107" in ics
+    assert r"SUMMARY:【ToDo】見積書を送る\, 確認\;する(田中)" in ics
+    assert all(len(line.encode("utf-8")) <= 75 for line in ics.split("\r\n"))
+    assert ics.startswith("BEGIN:VCALENDAR\r\n") and ics.endswith("END:VCALENDAR\r\n")
+
+
+def test_long_japanese_titles_fold_without_breaking_characters():
+    todos = [{"task": "あ" * 100, "owner": "", "due": "11/6"}]
+    ics = app_module.todos_to_ics(todos, _date(2026, 10, 30))
+    unfolded = ics.replace("\r\n ", "")
+    assert "あ" * 100 in unfolded
+
+
+def test_no_ics_button_when_no_todo_has_a_date(client):
+    data = _json.dumps({"summary": "s", "decisions": [], "todos": [{"task": "x", "owner": "", "due": ""}]})
+    with patch.object(
+        app_module.client.messages, "create", return_value=fake_message([text_block(data)])
+    ):
+        body = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT}).data.decode("utf-8")
+    assert 'id="download-ics"' not in body
+
+
+def test_ics_button_uses_meeting_date_for_year(client):
+    data = _json.dumps(
+        {"summary": "s", "decisions": [], "todos": [{"task": "x", "owner": "", "due": "1/10"}]}
+    )
+    with patch.object(
+        app_module.client.messages, "create", return_value=fake_message([text_block(data)])
+    ):
+        body = client.post(
+            "/", data={"transcript": SAMPLE_TRANSCRIPT, "meeting_date": "2026-12-20"}
+        ).data.decode("utf-8")
+    assert 'id="download-ics"' in body
+    assert "DTSTART;VALUE=DATE:20270110" in body
