@@ -31,6 +31,19 @@ def clean_data_dir():
         shutil.rmtree(DATA_DIR)
 
 
+@pytest.fixture(autouse=True)
+def no_real_stripe_calls():
+    """Default every Stripe call to a harmless mock; tests override as needed."""
+    with patch.object(
+        app_module.stripe.PaymentIntent, "search", return_value=SimpleNamespace(data=[])
+    ) as search, patch.object(app_module.stripe.PaymentIntent, "modify") as modify, patch.object(
+        app_module.stripe.PaymentIntent, "retrieve", side_effect=RuntimeError("not mocked")
+    ), patch.object(
+        app_module.stripe.checkout.Session, "retrieve", side_effect=RuntimeError("not mocked")
+    ):
+        yield SimpleNamespace(search=search, modify=modify)
+
+
 @pytest.fixture
 def client():
     app_module.app.config["TESTING"] = True
@@ -389,3 +402,117 @@ def test_waitlist_neutralizes_csv_formulas(client):
     with open(app_module.WAITLIST_FILE, encoding="utf-8") as f:
         content = f.read()
     assert "'=HYPERLINK" in content
+
+
+# --- Stripe backup of access codes (survives Render redeploys) ---------------
+
+
+def paid_session(pi_id="pi_123"):
+    return SimpleNamespace(payment_status="paid", payment_intent=pi_id)
+
+
+def test_new_code_is_backed_up_to_payment_intent(client, no_real_stripe_calls):
+    with patch.object(
+        app_module.stripe.checkout.Session, "retrieve", return_value=paid_session()
+    ), patch.object(
+        app_module.stripe.PaymentIntent, "retrieve", return_value=SimpleNamespace(metadata={})
+    ):
+        r = client.get("/purchase/success?session_id=sess_b1")
+    import re
+
+    code = re.search(r"GJK-[A-Z0-9]{8}", r.data.decode("utf-8")).group()
+    no_real_stripe_calls.modify.assert_called_once_with(
+        "pi_123",
+        metadata={
+            "access_code": code,
+            "remaining_uses": "10",
+            "checkout_session_id": "sess_b1",
+        },
+    )
+
+
+def test_success_page_after_redeploy_shows_same_code(client, no_real_stripe_calls):
+    """data/ was wiped but Stripe still knows the code: don't mint a second one."""
+    pi = SimpleNamespace(
+        status="succeeded",
+        metadata={"access_code": "GJK-ABCD1234", "remaining_uses": "7", "checkout_session_id": "sess_r1"},
+    )
+    no_real_stripe_calls.search.return_value = SimpleNamespace(data=[pi])
+    with patch.object(
+        app_module.stripe.checkout.Session, "retrieve", return_value=paid_session()
+    ), patch.object(app_module.stripe.PaymentIntent, "retrieve", return_value=pi):
+        r = client.get("/purchase/success?session_id=sess_r1")
+    assert "GJK-ABCD1234" in r.data.decode("utf-8")
+    assert app_module.find_access_code_row("GJK-ABCD1234")["remaining_uses"] == "7"
+    no_real_stripe_calls.modify.assert_not_called()
+
+
+def test_unknown_local_code_is_restored_from_stripe(client, no_real_stripe_calls):
+    pi = SimpleNamespace(
+        status="succeeded",
+        metadata={"access_code": "GJK-REST0RE1", "remaining_uses": "3", "checkout_session_id": "sess_x"},
+    )
+    no_real_stripe_calls.search.return_value = SimpleNamespace(data=[pi])
+    assert app_module.code_has_remaining_uses("gjk-rest0re1")
+    no_real_stripe_calls.search.assert_called_once_with(
+        query="metadata['access_code']:'GJK-REST0RE1'"
+    )
+    assert app_module.find_access_code_row("GJK-REST0RE1")["remaining_uses"] == "3"
+
+
+def test_restored_code_with_zero_uses_is_rejected(client, no_real_stripe_calls):
+    pi = SimpleNamespace(
+        status="succeeded",
+        metadata={"access_code": "GJK-USEDUP00", "remaining_uses": "0", "checkout_session_id": "s"},
+    )
+    no_real_stripe_calls.search.return_value = SimpleNamespace(data=[pi])
+    assert not app_module.code_has_remaining_uses("GJK-USEDUP00")
+
+
+def test_unpaid_payment_intent_is_not_restored(client, no_real_stripe_calls):
+    pi = SimpleNamespace(
+        status="requires_payment_method",
+        metadata={"access_code": "GJK-NOTPAID0", "remaining_uses": "10"},
+    )
+    no_real_stripe_calls.search.return_value = SimpleNamespace(data=[pi])
+    assert not app_module.code_has_remaining_uses("GJK-NOTPAID0")
+
+
+def test_malformed_code_never_reaches_stripe_search(client, no_real_stripe_calls):
+    assert not app_module.code_has_remaining_uses("GJK-AAAA' OR status:'succeeded")
+    no_real_stripe_calls.search.assert_not_called()
+
+
+def test_stripe_search_failure_just_rejects_code(client, no_real_stripe_calls):
+    no_real_stripe_calls.search.side_effect = RuntimeError("stripe down")
+    assert not app_module.code_has_remaining_uses("GJK-ABCDEFGH")
+
+
+def test_redeem_syncs_remaining_uses_to_stripe(client, no_real_stripe_calls):
+    code = app_module.create_access_code("sess_sync", uses=5)
+    with patch.object(
+        app_module.stripe.checkout.Session, "retrieve", return_value=paid_session("pi_sync")
+    ):
+        assert app_module.redeem_code(code)
+    no_real_stripe_calls.modify.assert_called_once_with(
+        "pi_sync",
+        metadata={"access_code": code, "remaining_uses": "4", "checkout_session_id": "sess_sync"},
+    )
+
+
+def test_redeem_still_works_when_stripe_backup_fails(client, no_real_stripe_calls):
+    code = app_module.create_access_code("sess_fail", uses=2)
+    no_real_stripe_calls.modify.side_effect = RuntimeError("stripe down")
+    with patch.object(
+        app_module.stripe.checkout.Session, "retrieve", return_value=paid_session()
+    ):
+        assert app_module.redeem_code(code)
+    assert app_module.find_access_code_row(code)["remaining_uses"] == "1"
+
+
+def test_stripe_object_metadata_is_read(client):
+    """Real StripeObjects are not dicts in stripe-python v16+."""
+    pi = app_module.stripe.PaymentIntent.construct_from(
+        {"id": "pi_x", "status": "succeeded", "metadata": {"access_code": "GJK-REALOBJ1"}}, "sk_test"
+    )
+    assert app_module._metadata(pi)["access_code"] == "GJK-REALOBJ1"
