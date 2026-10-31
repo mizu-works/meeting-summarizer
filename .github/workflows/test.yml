@@ -19,4 +19,4 @@ jobs:
           cache: pip
           cache-dependency-path: mvp-meeting-summarizer/requirements.txt
       - run: pip install -r requirements.txt
-      - run: pytest test_app.py -v
+      - run: pytest -v
