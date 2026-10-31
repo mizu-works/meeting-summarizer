@@ -14,7 +14,11 @@
     .note { color: #666; font-size: 0.85rem; margin-top: 8px; }
     .quota { color: #1a5fb4; font-size: 0.85rem; margin-top: 4px; }
     .access-code { margin-top: 12px; }
-    .char-count { text-align: right; font-size: 0.8rem; color: #666; margin-top: 2px; }
+    .below-textarea { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    .file-pick { font-size: 0.85rem; color: #1a5fb4; cursor: pointer; text-decoration: underline; }
+    .file-pick input { display: none; }
+    .hint { margin-top: 4px; }
+    .char-count { font-size: 0.8rem; color: #666; margin-left: auto; }
     .char-count.over { color: #b00020; font-weight: bold; }
     .remember { display: inline-block; font-size: 0.85rem; color: #444; margin-left: 8px; white-space: nowrap; }
     .progress { margin-left: 12px; font-size: 0.85rem; color: #1a5fb4; }
@@ -47,7 +51,13 @@
   </p>
   <form method="post" id="summarize-form">
     <textarea name="transcript" id="transcript" placeholder="Zoomの文字起こしや面談メモをここに貼り付けてください">{{ transcript }}</textarea>
-    <div class="char-count" id="char-count" data-max="{{ max_chars }}"></div>
+    <div class="below-textarea">
+      <label class="file-pick">ファイルから読み込む(.txt / .vtt / .srt)
+        <input type="file" id="file-input" accept=".txt,.vtt,.srt,text/plain,text/vtt">
+      </label>
+      <span class="char-count" id="char-count" data-max="{{ max_chars }}"></span>
+    </div>
+    <p class="note hint">ZoomやTeamsの字幕ファイル(.vtt)は、タイムスタンプを自動で取り除いてから要約します。</p>
     <div class="access-code">
       <label for="access_code">アクセスコード(お持ちの方のみ):</label><br>
       <input type="text" id="access_code" name="access_code" value="{{ access_code }}" placeholder="GJK-XXXXXXXX" autocomplete="off">
@@ -75,6 +85,28 @@
       textarea.addEventListener("input", updateCount);
       updateCount();
 
+      // Subtitle files shrink a lot once the server strips timestamps,
+      // so only plain text is held to the limit here.
+      function looksLikeSubtitles(text) {
+        return /\d{1,2}:\d{2}[.,]\d{1,3}\s*-->/.test(text);
+      }
+
+      document.getElementById("file-input").addEventListener("change", function (e) {
+        var file = e.target.files[0];
+        if (!file) return;
+        file.arrayBuffer().then(function (buf) {
+          var text;
+          try {
+            text = new TextDecoder("utf-8", { fatal: true }).decode(buf);
+          } catch (err) {
+            // Notepad on Japanese Windows often saves as Shift_JIS
+            text = new TextDecoder("shift_jis").decode(buf);
+          }
+          textarea.value = text.replace(/^\ufeff/, "");
+          updateCount();
+        });
+      });
+
       // Storage can throw in private mode; the form must work without it.
       try {
         var saved = localStorage.getItem(STORAGE_KEY);
@@ -87,7 +119,7 @@
       form.addEventListener("submit", function (e) {
         // A second click would send a second request and use up a second try.
         if (button.disabled) { e.preventDefault(); return; }
-        if (textarea.value.length > max) {
+        if (textarea.value.length > max && !looksLikeSubtitles(textarea.value)) {
           e.preventDefault();
           counter.classList.add("over");
           textarea.focus();

@@ -521,3 +521,70 @@ def test_form_exposes_char_limit_and_submit_guard(client):
     body = client.get("/").data.decode("utf-8")
     assert f'data-max="{app_module.MAX_TRANSCRIPT_CHARS}"' in body
     assert 'id="submit-button"' in body
+
+
+# --- Subtitle (.vtt / .srt) cleanup --------------------------------------------
+
+ZOOM_VTT = """WEBVTT
+
+1
+00:00:01.200 --> 00:00:05.800
+高橋: では定例を始めます。
+
+2
+00:00:06.100 --> 00:00:12.400
+高橋: デザイン案はAで確定です。
+
+3
+00:00:12.900 --> 00:00:18.300
+伊藤: はい。
+コーディングは私がやります。
+"""
+
+TEAMS_VTT = """WEBVTT
+
+0a1b2c3d-4e5f/12-0
+00:00:01.000 --> 00:00:04.000
+<v 山田 太郎>こんにちは。</v>
+
+0a1b2c3d-4e5f/14-0
+00:00:06.500 --> 00:00:08.000
+<v 佐藤 花子>資料を共有します。</v>
+"""
+
+
+def test_zoom_vtt_is_cleaned_and_same_speaker_merged():
+    assert app_module.clean_transcript(ZOOM_VTT) == (
+        "高橋: では定例を始めます。 デザイン案はAで確定です。\n"
+        "伊藤: はい。 コーディングは私がやります。"
+    )
+
+
+def test_teams_voice_tags_become_speaker_names():
+    assert app_module.clean_transcript(TEAMS_VTT) == (
+        "山田 太郎: こんにちは。\n佐藤 花子: 資料を共有します。"
+    )
+
+
+def test_srt_with_crlf_and_no_speakers_keeps_lines():
+    srt = "1\r\n00:00:01,000 --> 00:00:03,000\r\nこんにちは\r\n\r\n2\r\n00:00:03,500 --> 00:00:05,000\r\n<i>よろしく</i>\r\n"
+    assert app_module.clean_transcript(srt) == "こんにちは\nよろしく"
+
+
+def test_plain_text_is_left_alone():
+    text = "田中: 10:30から会議です。\n佐藤: 了解です。"
+    assert app_module.clean_transcript(text) == text
+
+
+def test_subtitles_are_cleaned_before_length_check_and_api_call(client):
+    """A long .vtt that fits once timestamps are gone must be accepted."""
+    cue = "00:00:01.000 --> 00:00:02.000\n高橋: はい\n\n"
+    vtt = "WEBVTT\n\n" + cue * (app_module.MAX_TRANSCRIPT_CHARS // len(cue) + 10)
+    assert len(vtt) > app_module.MAX_TRANSCRIPT_CHARS
+    with patch.object(
+        app_module.client.messages, "create", return_value=fake_message([text_block("OK")])
+    ) as create:
+        client.post("/", data={"transcript": vtt})
+    sent = create.call_args.kwargs["messages"][0]["content"]
+    assert "-->" not in sent
+    assert sent.startswith("高橋: はい はい")

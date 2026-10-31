@@ -14,6 +14,8 @@ from flask import Flask, render_template, request
 load_dotenv()
 
 app = Flask(__name__)
+# Generous for a cleaned-up hour-long subtitle file, but stops huge uploads.
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
 client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
 
@@ -204,6 +206,47 @@ def redeem_code(code):
     return True
 
 
+TIMESTAMP_LINE = re.compile(r"^\s*(\d{1,2}:)?\d{1,2}:\d{2}[.,]\d{1,3}\s*-->")
+SPEAKER_LINE = re.compile(r"^([^:：\s][^:：]{0,29})[:：]\s*(.*)$")
+VOICE_TAG = re.compile(r"^<v(?:\.[^\s>]*)?\s+([^>]+)>(.*?)(?:</v>)?$")
+
+
+def clean_transcript(text):
+    """Turn Zoom/Teams .vtt or .srt subtitles into plain "name: text" lines.
+
+    Timestamps and cue numbers are dropped and consecutive lines by the same
+    speaker are merged. Anything that isn't subtitles is returned unchanged.
+    """
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not any(TIMESTAMP_LINE.match(line) for line in text.split("\n")):
+        return text
+
+    entries = []  # [speaker or None, text]
+    for block in re.split(r"\n\s*\n", text):
+        lines = block.strip("\n").split("\n")
+        ts = next((i for i, line in enumerate(lines) if TIMESTAMP_LINE.match(line)), None)
+        if ts is None:
+            continue  # WEBVTT header, NOTE, STYLE, REGION blocks
+        for line in lines[ts + 1:]:
+            line = line.strip()
+            voice = VOICE_TAG.match(line)
+            if voice:
+                speaker, body = voice.group(1).strip(), voice.group(2)
+            else:
+                m = SPEAKER_LINE.match(re.sub(r"<[^>]+>", "", line))
+                speaker, body = (m.group(1).strip(), m.group(2)) if m else (None, line)
+            body = re.sub(r"<[^>]+>", "", body).strip()
+            if not body:
+                continue
+            prev = entries[-1][0] if entries else None
+            # Same speaker continues, or an unnamed line continues a named one.
+            if entries and prev is not None and speaker in (None, prev):
+                entries[-1][1] += " " + body
+            else:
+                entries.append([speaker, body])
+    return "\n".join(f"{sp}: {body}" if sp else body for sp, body in entries)
+
+
 SYSTEM_PROMPT = """あなたは商談・面談の文字起こしから重要情報を抽出するアシスタントです。
 入力されたテキストを読み、指定のJSON形式で日本語で出力してください。
 
@@ -287,7 +330,7 @@ def index():
     remaining_free = FREE_MONTHLY_LIMIT - count_free_uses_this_month(get_client_ip())
 
     if request.method == "POST":
-        transcript = request.form.get("transcript", "").strip()
+        transcript = clean_transcript(request.form.get("transcript", "")).strip()
         access_code = request.form.get("access_code", "").strip()
         ip = get_client_ip()
 
