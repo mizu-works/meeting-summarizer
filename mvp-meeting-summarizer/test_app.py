@@ -32,6 +32,13 @@ def clean_data_dir():
 
 
 @pytest.fixture(autouse=True)
+def reset_stripe_lookup_limits():
+    app_module._stripe_lookups.clear()
+    app_module._missed_codes.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def no_real_stripe_calls():
     """Default every Stripe call to a harmless mock; tests override as needed."""
     with patch.object(
@@ -1170,3 +1177,50 @@ def test_ics_button_uses_meeting_date_for_year(client):
         ).data.decode("utf-8")
     assert 'id="download-ics"' in body
     assert "DTSTART;VALUE=DATE:20270110" in body
+
+
+# --- Limits on Stripe lookups for unknown codes -------------------------------------------
+
+
+def _random_code(i):
+    return f"GJK-ZZZZ{i:04d}".replace("0", "A").replace("1", "B")
+
+
+def test_stripe_lookups_are_limited_per_ip(no_real_stripe_calls):
+    limit = app_module.STRIPE_LOOKUPS_PER_IP_PER_HOUR
+    for i in range(limit + 5):
+        app_module.code_has_remaining_uses(_random_code(i), ip="203.0.113.7")
+    assert no_real_stripe_calls.search.call_count == limit
+    # another visitor is not affected
+    app_module.code_has_remaining_uses(_random_code(999), ip="198.51.100.2")
+    assert no_real_stripe_calls.search.call_count == limit + 1
+
+
+def test_a_code_stripe_does_not_know_is_not_searched_again_soon(no_real_stripe_calls):
+    for ip in ("203.0.113.1", "203.0.113.2", "203.0.113.3"):
+        assert not app_module.code_has_remaining_uses("GJK-NOSUCHAB", ip=ip)
+    assert no_real_stripe_calls.search.call_count == 1
+
+
+def test_stripe_errors_are_not_remembered_as_missing(no_real_stripe_calls):
+    no_real_stripe_calls.search.side_effect = RuntimeError("stripe down")
+    assert not app_module.code_has_remaining_uses("GJK-RETRYME2", ip="203.0.113.9")
+    no_real_stripe_calls.search.side_effect = None
+    pi = SimpleNamespace(
+        status="succeeded",
+        metadata={"access_code": "GJK-RETRYME2", "remaining_uses": "4", "checkout_session_id": "s"},
+    )
+    no_real_stripe_calls.search.return_value = SimpleNamespace(data=[pi])
+    assert app_module.code_has_remaining_uses("GJK-RETRYME2", ip="203.0.113.9")
+
+
+def test_local_codes_never_hit_stripe_or_the_limit(no_real_stripe_calls):
+    code = app_module.create_access_code("sess_local", uses=3)
+    for _ in range(app_module.STRIPE_LOOKUPS_PER_IP_PER_HOUR + 5):
+        assert app_module.code_has_remaining_uses(code, ip="203.0.113.50")
+    no_real_stripe_calls.search.assert_not_called()
+
+
+def test_error_message_is_announced_to_screen_readers(client):
+    body = client.post("/", data={"transcript": ""}).data.decode("utf-8")
+    assert 'role="alert"' in body

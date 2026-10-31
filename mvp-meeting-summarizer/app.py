@@ -239,14 +239,18 @@ def backup_code_to_stripe(session_id, code, remaining, payment_intent_id=None):
 
 
 def restore_code_from_stripe(code):
-    """Recreate a local code row from Stripe. Returns True if restored."""
+    """Recreate a local code row from Stripe.
+
+    Returns True if restored, False if Stripe has no such paid code, and
+    None if Stripe couldn't be asked (so the miss isn't remembered).
+    """
     if not ACCESS_CODE_PATTERN.match(code):
         return False  # also keeps arbitrary input out of the search query
     try:
         results = stripe.PaymentIntent.search(query=f"metadata['access_code']:'{code}'")
     except Exception:
         app.logger.exception("Failed to look up access code %s in Stripe", code)
-        return False
+        return None
     return any(_restore_from_payment_intent(pi, code) for pi in getattr(results, "data", []))
 
 
@@ -265,14 +269,47 @@ def _restore_from_payment_intent(pi, code):
     return True
 
 
-def code_has_remaining_uses(code):
+# Every unknown, well-formed code costs a Stripe Search call. Without a limit,
+# anyone posting random codes could use up the account's Stripe rate limit and
+# break restores and payment checks for real buyers.
+STRIPE_LOOKUPS_PER_IP_PER_HOUR = 10
+MISSED_CODE_TTL_SECONDS = 600
+_stripe_lookups = {}  # ip -> monotonic times of recent lookups
+_missed_codes = {}  # code -> monotonic time Stripe said it doesn't exist
+_limiter_lock = threading.Lock()
+
+
+def _may_ask_stripe(code, ip):
+    now = time.monotonic()
+    with _limiter_lock:
+        if len(_missed_codes) > 10000 or len(_stripe_lookups) > 10000:
+            _missed_codes.clear()  # bound memory; worst case a few extra lookups
+            _stripe_lookups.clear()
+        missed_at = _missed_codes.get(code)
+        if missed_at is not None and now - missed_at < MISSED_CODE_TTL_SECONDS:
+            return False
+        recent = [t for t in _stripe_lookups.get(ip, []) if now - t < 3600]
+        if len(recent) >= STRIPE_LOOKUPS_PER_IP_PER_HOUR:
+            _stripe_lookups[ip] = recent
+            app.logger.warning("Stripe code lookups rate-limited for %s", ip)
+            return False
+        _stripe_lookups[ip] = recent + [now]
+        return True
+
+
+def code_has_remaining_uses(code, ip="unknown"):
     """Check validity without consuming a use."""
     code = normalize_code(code)
     if not code:
         return False
     row = find_access_code_row(code)
-    if row is None and restore_code_from_stripe(code):
-        row = find_access_code_row(code)
+    if row is None and ACCESS_CODE_PATTERN.match(code) and _may_ask_stripe(code, ip):
+        restored = restore_code_from_stripe(code)
+        if restored:
+            row = find_access_code_row(code)
+        elif restored is False:
+            with _limiter_lock:
+                _missed_codes[code] = time.monotonic()
     return row is not None and int(row["remaining_uses"]) > 0
 
 
@@ -685,7 +722,7 @@ def index():
             used_code = False
             if access_code:
                 # code_has_remaining_uses also restores codes wiped by a redeploy
-                if code_has_remaining_uses(access_code) and redeem_code(access_code):
+                if code_has_remaining_uses(access_code, ip) and redeem_code(access_code):
                     used_code = True
                 else:
                     error = "アクセスコードが無効か、利用回数の上限に達しています。"

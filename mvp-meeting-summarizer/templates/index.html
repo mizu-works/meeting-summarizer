@@ -115,7 +115,7 @@
       <label class="remember"><input type="checkbox" id="remember-code"> このブラウザに保存する</label>
     </div>
     <button type="submit" id="submit-button">要約・タスク抽出する</button>
-    <span class="progress" id="progress" hidden>処理中です。長い文字起こしだと1分ほどかかることがあります…</span>
+    <span class="progress" id="progress" role="status" aria-live="polite" hidden>処理中です。長い文字起こしだと1分ほどかかることがあります…</span>
   </form>
   <script>
     (function () {
@@ -214,7 +214,7 @@
   </script>
 
   {% if error %}
-  <div class="error">{{ error }}</div>
+  <div class="error" role="alert">{{ error }}</div>
   {% endif %}
 
   {% if summary %}
