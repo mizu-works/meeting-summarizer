@@ -17,6 +17,9 @@ services:
         sync: false
       - key: STRIPE_SECRET_KEY
         sync: false
+      # 設定すると /stripe/webhook で支払い完了を受け取り、その時点でコードを発行する(README参照)
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
       # 設定すると /admin(管理ページ)が使えるようになる。未設定なら /admin は存在しない
       - key: ADMIN_PASSWORD
         sync: false

@@ -223,19 +223,22 @@ def restore_code_from_stripe(code):
     except Exception:
         app.logger.exception("Failed to look up access code %s in Stripe", code)
         return False
-    for pi in getattr(results, "data", []):
-        md = _metadata(pi)
-        if getattr(pi, "status", None) != "succeeded" or md.get("access_code") != code:
-            continue
-        try:
-            remaining = int(md.get("remaining_uses", PACK_USES))
-        except ValueError:
-            remaining = PACK_USES
-        with DATA_LOCK:
-            if find_access_code_row(code) is None:
-                create_access_code(md.get("checkout_session_id", ""), remaining, code=code)
-        return True
-    return False
+    return any(_restore_from_payment_intent(pi, code) for pi in getattr(results, "data", []))
+
+
+def _restore_from_payment_intent(pi, code):
+    """Recreate the local row for code from a paid PaymentIntent's metadata."""
+    md = _metadata(pi)
+    if getattr(pi, "status", None) != "succeeded" or md.get("access_code") != code:
+        return False
+    try:
+        remaining = int(md.get("remaining_uses", PACK_USES))
+    except ValueError:
+        remaining = PACK_USES
+    with DATA_LOCK:
+        if find_access_code_row(code) is None:
+            create_access_code(md.get("checkout_session_id", ""), remaining, code=code)
+    return True
 
 
 def code_has_remaining_uses(code):
@@ -632,7 +635,7 @@ def restore_code_for_session(session):
         app.logger.exception("Failed to retrieve PaymentIntent %s", pi_id)
         return None
     code = _metadata(pi).get("access_code")
-    if code and (find_access_code_row(code) or restore_code_from_stripe(code)):
+    if code and (find_access_code_row(code) or _restore_from_payment_intent(pi, code)):
         return code
     return None
 
@@ -641,6 +644,43 @@ def create_and_back_up_code(session_id, session):
     code = create_access_code(session_id)
     backup_code_to_stripe(session_id, code, PACK_USES, _payment_intent_id(session))
     return code
+
+
+def ensure_code_for_session(session_id, session):
+    """Return the code for a paid Checkout Session, issuing it on first call.
+
+    Called from both the success page and the webhook, in either order and
+    any number of times; it is atomic so they never mint two codes.
+    """
+    with DATA_LOCK:
+        existing = find_access_code_by_session(session_id)
+        if existing:
+            return existing["code"]
+        return restore_code_for_session(session) or create_and_back_up_code(session_id, session)
+
+
+PAID_EVENTS = ("checkout.session.completed", "checkout.session.async_payment_succeeded")
+
+
+@app.route("/stripe/webhook", methods=["POST"])
+def stripe_webhook():
+    """Issue the code as soon as Stripe confirms payment, so a buyer who
+    closes the tab before the success page still has a code on record
+    (visible in the Stripe dashboard under the payment's metadata)."""
+    secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+    if not secret:
+        abort(404)
+    try:
+        event = stripe.Webhook.construct_event(
+            request.get_data(), request.headers.get("Stripe-Signature"), secret
+        )
+    except Exception:
+        return "invalid signature", 400
+    if event.type in PAID_EVENTS:
+        session = event.data.object
+        if getattr(session, "payment_status", None) == "paid":
+            ensure_code_for_session(session.id, session)
+    return "", 200
 
 
 @app.route("/purchase/success")
@@ -665,13 +705,7 @@ def purchase_success():
             "purchase_success.html", error="お支払いが完了していません。", code=None
         )
 
-    # Atomic so two simultaneous loads of this page can't mint two codes.
-    with DATA_LOCK:
-        existing = find_access_code_by_session(session_id)
-        if existing:
-            code = existing["code"]
-        else:
-            code = restore_code_for_session(session) or create_and_back_up_code(session_id, session)
+    code = ensure_code_for_session(session_id, session)
 
     return render_template("purchase_success.html", error=None, code=code, uses=PACK_USES)
 
