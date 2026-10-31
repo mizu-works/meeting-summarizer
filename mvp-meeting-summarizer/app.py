@@ -144,9 +144,13 @@ def release_free_use(ip, token):
         csv.writer(f).writerows(kept)
 
 
+# 0/O and 1/I are left out so a code read aloud or copied by hand isn't
+# mistyped. Codes issued before this still match ACCESS_CODE_PATTERN.
+CODE_CHARS = "".join(c for c in string.ascii_uppercase + string.digits if c not in "0O1I")
+
+
 def generate_access_code():
-    chars = string.ascii_uppercase + string.digits
-    return "GJK-" + "".join(secrets.choice(chars) for _ in range(8))
+    return "GJK-" + "".join(secrets.choice(CODE_CHARS) for _ in range(8))
 
 
 def normalize_code(code):

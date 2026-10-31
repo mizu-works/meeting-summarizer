@@ -1096,3 +1096,10 @@ def test_email_draft_is_shown_and_included_in_markdown(client):
     md = app_module.summary_to_markdown(app_module.parse_summary(data))
     assert md.endswith("本日はありがとうございました。")
     assert "## メール下書き" in md
+
+
+def test_new_codes_avoid_look_alike_characters():
+    for _ in range(200):
+        code = app_module.generate_access_code()
+        assert app_module.ACCESS_CODE_PATTERN.match(code)
+        assert not set(code[4:]) & set("0O1I")
