@@ -56,3 +56,12 @@ python eval/run_eval.py --save eval/results.json             # 出力を保存
 - 今月の成功/失敗数、API費用の推定、処理時間、販売したコード数、ウェイトリスト件数、直近14日の推移
 - ウェイトリストと利用ログをCSVでダウンロードできる。`data/` は再デプロイで消えるので、デプロイ前に退避する
 - 利用ログ(`data/usage_log.csv`)には文字起こしの内容もIPアドレスも記録しない(日時・文字数・処理時間・結果・トークン数のみ)
+
+## API の設定
+- タイムアウトは 120 秒・リトライ 1 回(SDK の既定は 10 分・2 回で、ブラウザでは待ちきれないため)
+- 環境変数 `CLAUDE_EFFORT`(`low` / `medium` / `high` / `xhigh` / `max`)で考える深さを調整できる。未設定ならモデルの既定(Sonnet 5 は `high`)
+  - 下げると速く・安くなるが、品質が落ちることがある。切り替える前に eval で比べる:
+    ```
+    python eval/run_eval.py --save eval/high.json
+    CLAUDE_EFFORT=medium python eval/run_eval.py --save eval/medium.json
+    ```

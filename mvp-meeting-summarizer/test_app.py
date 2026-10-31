@@ -787,3 +787,37 @@ def test_admin_download_waitlist_and_reject_other_files(client, monkeypatch):
 
 def test_robots_disallows_admin(client):
     assert "Disallow: /admin" in client.get("/robots.txt").data.decode("utf-8")
+
+
+# --- API settings -----------------------------------------------------------------
+
+
+def test_effort_is_sent_only_when_configured(client, monkeypatch):
+    ok = fake_message([text_block("OK")])
+    monkeypatch.setattr(app_module, "EFFORT", None)
+    with patch.object(app_module.client.messages, "create", return_value=ok) as create:
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    assert "effort" not in create.call_args.kwargs["output_config"]
+
+    monkeypatch.setattr(app_module, "EFFORT", "low")
+    with patch.object(app_module.client.messages, "create", return_value=ok) as create:
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    assert create.call_args.kwargs["output_config"]["effort"] == "low"
+    assert create.call_args.kwargs["output_config"]["format"]["type"] == "json_schema"
+
+
+def test_invalid_effort_env_is_ignored(monkeypatch):
+    import importlib
+
+    monkeypatch.setenv("CLAUDE_EFFORT", "turbo")
+    reloaded = importlib.reload(app_module)
+    try:
+        assert reloaded.EFFORT is None
+    finally:
+        monkeypatch.delenv("CLAUDE_EFFORT")
+        importlib.reload(app_module)
+
+
+def test_client_gives_up_before_users_do():
+    assert app_module.client.timeout <= 120
+    assert app_module.client.max_retries <= 1
