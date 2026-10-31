@@ -14,7 +14,12 @@
     .note { color: #666; font-size: 0.85rem; margin-top: 8px; }
     .quota { color: #1a5fb4; font-size: 0.85rem; margin-top: 4px; }
     .access-code { margin-top: 12px; }
-    .access-code input { padding: 6px; font-size: 0.9rem; width: 200px; }
+    .char-count { text-align: right; font-size: 0.8rem; color: #666; margin-top: 2px; }
+    .char-count.over { color: #b00020; font-weight: bold; }
+    .remember { display: inline-block; font-size: 0.85rem; color: #444; margin-left: 8px; white-space: nowrap; }
+    .progress { margin-left: 12px; font-size: 0.85rem; color: #1a5fb4; }
+    button:disabled { cursor: wait; opacity: 0.7; }
+    .access-code input[type=text] { padding: 6px; font-size: 0.9rem; width: 200px; }
     .summary { background: #f6f6f6; padding: 8px 16px 16px; border-radius: 8px; margin-top: 24px; line-height: 1.6; }
     .summary h2 { font-size: 1.05rem; margin: 16px 0 6px; }
     .summary-text { white-space: pre-wrap; margin: 0; }
@@ -40,15 +45,74 @@
     無料枠: 今月あと{{ remaining_free }}/{{ free_limit }}回利用できます。
     それ以上使いたい方は<a href="/waitlist">早期アクセス申し込み</a>からアクセスコードをご購入ください。
   </p>
-  <form method="post">
-    <textarea name="transcript" placeholder="Zoomの文字起こしや面談メモをここに貼り付けてください">{{ transcript }}</textarea>
-    <br>
+  <form method="post" id="summarize-form">
+    <textarea name="transcript" id="transcript" placeholder="Zoomの文字起こしや面談メモをここに貼り付けてください">{{ transcript }}</textarea>
+    <div class="char-count" id="char-count" data-max="{{ max_chars }}"></div>
     <div class="access-code">
       <label for="access_code">アクセスコード(お持ちの方のみ):</label><br>
-      <input type="text" id="access_code" name="access_code" value="{{ access_code }}" placeholder="GJK-XXXXXXXX">
+      <input type="text" id="access_code" name="access_code" value="{{ access_code }}" placeholder="GJK-XXXXXXXX" autocomplete="off">
+      <label class="remember"><input type="checkbox" id="remember-code"> このブラウザに保存する</label>
     </div>
-    <button type="submit">要約・タスク抽出する</button>
+    <button type="submit" id="submit-button">要約・タスク抽出する</button>
+    <span class="progress" id="progress" hidden>処理中です。長い文字起こしだと1分ほどかかることがあります…</span>
   </form>
+  <script>
+    (function () {
+      var form = document.getElementById("summarize-form");
+      var textarea = document.getElementById("transcript");
+      var counter = document.getElementById("char-count");
+      var button = document.getElementById("submit-button");
+      var codeInput = document.getElementById("access_code");
+      var remember = document.getElementById("remember-code");
+      var max = parseInt(counter.dataset.max, 10);
+      var STORAGE_KEY = "gjk_access_code";
+
+      function updateCount() {
+        var n = textarea.value.length;
+        counter.textContent = n.toLocaleString() + " / " + max.toLocaleString() + "文字";
+        counter.classList.toggle("over", n > max);
+      }
+      textarea.addEventListener("input", updateCount);
+      updateCount();
+
+      // Storage can throw in private mode; the form must work without it.
+      try {
+        var saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          remember.checked = true;
+          if (!codeInput.value) codeInput.value = saved;
+        }
+      } catch (e) {}
+
+      form.addEventListener("submit", function (e) {
+        // A second click would send a second request and use up a second try.
+        if (button.disabled) { e.preventDefault(); return; }
+        if (textarea.value.length > max) {
+          e.preventDefault();
+          counter.classList.add("over");
+          textarea.focus();
+          return;
+        }
+        try {
+          if (remember.checked && codeInput.value.trim()) {
+            localStorage.setItem(STORAGE_KEY, codeInput.value.trim());
+          } else {
+            localStorage.removeItem(STORAGE_KEY);
+          }
+        } catch (e) {}
+        button.disabled = true;
+        button.textContent = "処理中…";
+        document.getElementById("progress").hidden = false;
+      });
+
+      // Coming back via the browser's back button restores a disabled button from cache.
+      window.addEventListener("pageshow", function () {
+        button.disabled = false;
+        button.textContent = "要約・タスク抽出する";
+        document.getElementById("progress").hidden = true;
+      });
+    })();
+  </script>
 
   {% if error %}
   <div class="error">{{ error }}</div>

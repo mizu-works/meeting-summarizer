@@ -516,3 +516,8 @@ def test_stripe_object_metadata_is_read(client):
         {"id": "pi_x", "status": "succeeded", "metadata": {"access_code": "GJK-REALOBJ1"}}, "sk_test"
     )
     assert app_module._metadata(pi)["access_code"] == "GJK-REALOBJ1"
+
+def test_form_exposes_char_limit_and_submit_guard(client):
+    body = client.get("/").data.decode("utf-8")
+    assert f'data-max="{app_module.MAX_TRANSCRIPT_CHARS}"' in body
+    assert 'id="submit-button"' in body

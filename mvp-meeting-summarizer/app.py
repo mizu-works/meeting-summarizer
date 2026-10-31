@@ -363,6 +363,7 @@ def index():
         access_code=access_code,
         remaining_free=max(remaining_free, 0),
         free_limit=FREE_MONTHLY_LIMIT,
+        max_chars=MAX_TRANSCRIPT_CHARS,
     )
 
 
