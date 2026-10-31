@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import re
 import secrets
 import string
 from datetime import datetime, timezone
@@ -66,6 +67,9 @@ def normalize_code(code):
     return (code or "").strip().upper()
 
 
+ACCESS_CODE_PATTERN = re.compile(r"^GJK-[A-Z0-9]{8}$")
+
+
 def find_access_code_by_session(session_id):
     if not os.path.exists(ACCESS_CODES_FILE):
         return None
@@ -77,9 +81,20 @@ def find_access_code_by_session(session_id):
     return None
 
 
-def create_access_code(session_id, uses=PACK_USES):
+def find_access_code_row(code):
+    if not os.path.exists(ACCESS_CODES_FILE):
+        return None
+    with open(ACCESS_CODES_FILE, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["code"] == code:
+                return row
+    return None
+
+
+def create_access_code(session_id, uses=PACK_USES, code=None):
     os.makedirs(DATA_DIR, exist_ok=True)
-    code = generate_access_code()
+    code = code or generate_access_code()
     is_new_file = not os.path.exists(ACCESS_CODES_FILE)
     with open(ACCESS_CODES_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -89,17 +104,78 @@ def create_access_code(session_id, uses=PACK_USES):
     return code
 
 
+# --- Stripe backup of access codes -------------------------------------------
+# data/ is wiped on every Render free-plan redeploy, which would make paid codes
+# vanish. Each code and its remaining uses are mirrored into the metadata of the
+# Stripe PaymentIntent that paid for it, and restored from there on a local miss.
+
+
+def _metadata(obj):
+    md = getattr(obj, "metadata", None)
+    if md is None:
+        return {}
+    return md.to_dict() if hasattr(md, "to_dict") else dict(md)
+
+
+def _payment_intent_id(session):
+    pi = getattr(session, "payment_intent", None)
+    if pi is None or isinstance(pi, str):
+        return pi
+    return getattr(pi, "id", None)
+
+
+def backup_code_to_stripe(session_id, code, remaining, payment_intent_id=None):
+    """Best effort: the local file stays the source of truth while it exists."""
+    try:
+        if not payment_intent_id:
+            payment_intent_id = _payment_intent_id(stripe.checkout.Session.retrieve(session_id))
+        if not payment_intent_id:
+            return False
+        stripe.PaymentIntent.modify(
+            payment_intent_id,
+            metadata={
+                "access_code": code,
+                "remaining_uses": str(remaining),
+                "checkout_session_id": session_id,
+            },
+        )
+        return True
+    except Exception:
+        app.logger.exception("Failed to back up access code %s to Stripe", code)
+        return False
+
+
+def restore_code_from_stripe(code):
+    """Recreate a local code row from Stripe. Returns True if restored."""
+    if not ACCESS_CODE_PATTERN.match(code):
+        return False  # also keeps arbitrary input out of the search query
+    try:
+        results = stripe.PaymentIntent.search(query=f"metadata['access_code']:'{code}'")
+    except Exception:
+        app.logger.exception("Failed to look up access code %s in Stripe", code)
+        return False
+    for pi in getattr(results, "data", []):
+        md = _metadata(pi)
+        if getattr(pi, "status", None) != "succeeded" or md.get("access_code") != code:
+            continue
+        try:
+            remaining = int(md.get("remaining_uses", PACK_USES))
+        except ValueError:
+            remaining = PACK_USES
+        create_access_code(md.get("checkout_session_id", ""), remaining, code=code)
+        return True
+    return False
+
+
 def code_has_remaining_uses(code):
     """Check validity without consuming a use."""
     code = normalize_code(code)
-    if not code or not os.path.exists(ACCESS_CODES_FILE):
+    if not code:
         return False
-    with open(ACCESS_CODES_FILE, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if row["code"] == code and int(row["remaining_uses"]) > 0:
-                return True
-    return False
+    row = find_access_code_row(code)
+    if row is None and restore_code_from_stripe(code):
+        row = find_access_code_row(code)
+    return row is not None and int(row["remaining_uses"]) > 0
 
 
 def redeem_code(code):
@@ -108,21 +184,25 @@ def redeem_code(code):
     if not code or not os.path.exists(ACCESS_CODES_FILE):
         return False
     rows = []
-    consumed = False
+    consumed = None
     with open(ACCESS_CODES_FILE, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames
         for row in reader:
-            if not consumed and row["code"] == code and int(row["remaining_uses"]) > 0:
+            if consumed is None and row["code"] == code and int(row["remaining_uses"]) > 0:
                 row["remaining_uses"] = str(int(row["remaining_uses"]) - 1)
-                consumed = True
+                consumed = row
             rows.append(row)
-    if consumed:
-        with open(ACCESS_CODES_FILE, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(rows)
-    return consumed
+    if consumed is None:
+        return False
+    with open(ACCESS_CODES_FILE, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    if consumed["stripe_session_id"]:
+        backup_code_to_stripe(consumed["stripe_session_id"], code, consumed["remaining_uses"])
+    return True
+
 
 SYSTEM_PROMPT = """あなたは商談・面談の文字起こしから重要情報を抽出するアシスタントです。
 入力されたテキストを読み、指定のJSON形式で日本語で出力してください。
@@ -325,6 +405,28 @@ def waitlist():
     return render_template("waitlist.html", submitted=submitted, error=error)
 
 
+def restore_code_for_session(session):
+    """After a redeploy, reloading the success page must show the same code, not mint a new one."""
+    pi_id = _payment_intent_id(session)
+    if not pi_id:
+        return None
+    try:
+        pi = stripe.PaymentIntent.retrieve(pi_id)
+    except Exception:
+        app.logger.exception("Failed to retrieve PaymentIntent %s", pi_id)
+        return None
+    code = _metadata(pi).get("access_code")
+    if code and (find_access_code_row(code) or restore_code_from_stripe(code)):
+        return code
+    return None
+
+
+def create_and_back_up_code(session_id, session):
+    code = create_access_code(session_id)
+    backup_code_to_stripe(session_id, code, PACK_USES, _payment_intent_id(session))
+    return code
+
+
 @app.route("/purchase/success")
 def purchase_success():
     session_id = request.args.get("session_id", "")
@@ -348,7 +450,10 @@ def purchase_success():
         )
 
     existing = find_access_code_by_session(session_id)
-    code = existing["code"] if existing else create_access_code(session_id)
+    if existing:
+        code = existing["code"]
+    else:
+        code = restore_code_for_session(session) or create_and_back_up_code(session_id, session)
 
     return render_template("purchase_success.html", error=None, code=code, uses=PACK_USES)
 
