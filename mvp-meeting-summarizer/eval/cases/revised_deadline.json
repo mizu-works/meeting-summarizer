@@ -1,0 +1,27 @@
+{
+  "name": "revised_deadline",
+  "description": "途中で期限が変わる会話。最終的な内容を採用するか",
+  "transcript": "部長: 提案書の締め切りは金曜でいけそう?\n小林: 金曜で出します。\n部長: あ、ちょっと待って。先方から連絡があって、プレゼンが来週水曜に前倒しになった。\n小林: そうなると、提案書は月曜には仕上げないとまずいですね。\n部長: うん、月曜の午前中にもらえる? 私が月曜午後にレビューする。\n小林: わかりました。月曜午前に出します。",
+  "checks": {
+    "todos_min": 1,
+    "todos_max": 3,
+    "todo_contains": [
+      {
+        "keywords": [
+          "提案書"
+        ],
+        "owner": "小林",
+        "due_contains": "月曜"
+      }
+    ],
+    "todo_must_not_contain": [
+      {
+        "keywords": [
+          "提案書"
+        ],
+        "owner": "小林",
+        "due_contains": "金曜"
+      }
+    ]
+  }
+}

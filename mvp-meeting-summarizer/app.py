@@ -23,6 +23,8 @@ FREE_USAGE_FILE = os.path.join(DATA_DIR, "free_usage.csv")
 FREE_MONTHLY_LIMIT = 5
 PACK_USES = 10
 MAX_TRANSCRIPT_CHARS = 50000
+MODEL = "claude-sonnet-5"
+MAX_TOKENS = 16000
 
 
 def get_client_ip():
@@ -197,6 +199,37 @@ def summary_to_markdown(s):
     return "\n".join(lines)
 
 
+def summarize(transcript):
+    """Call Claude and return (summary, markdown, error, message).
+
+    summary is None when the output wasn't the expected JSON; markdown then
+    holds the raw text. Exactly one of markdown / error is set.
+    """
+    # Sonnet 5 thinks by default and thinking tokens count toward
+    # max_tokens, so a small cap truncates the actual answer.
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": transcript}],
+        output_config={"format": {"type": "json_schema", "schema": SUMMARY_SCHEMA}},
+    )
+    text_blocks = [block.text for block in message.content if block.type == "text"]
+    # Check stop_reason first: a refusal or a truncated response
+    # can still carry partial text that must not be shown or billed.
+    if message.stop_reason == "refusal":
+        error = (
+            "入力内容がAIの安全基準により処理を拒否されました。"
+            "内容をご確認のうえ、再度お試しください。"
+        )
+        return None, None, error, message
+    if message.stop_reason == "max_tokens" or not text_blocks:
+        return None, None, "AIからの応答を取得できませんでした。もう一度お試しください。", message
+    raw = "\n".join(text_blocks)
+    summary = parse_summary(raw)
+    return summary, (summary_to_markdown(summary) if summary else raw), None, message
+
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     result = None
@@ -237,34 +270,9 @@ def index():
 
             if allowed:
                 try:
-                    # Sonnet 5 thinks by default and thinking tokens count toward
-                    # max_tokens, so a small cap truncates the actual answer.
-                    message = client.messages.create(
-                        model="claude-sonnet-5",
-                        max_tokens=16000,
-                        system=SYSTEM_PROMPT,
-                        messages=[{"role": "user", "content": transcript}],
-                        output_config={
-                            "format": {"type": "json_schema", "schema": SUMMARY_SCHEMA}
-                        },
-                    )
-                    text_blocks = [
-                        block.text for block in message.content if block.type == "text"
-                    ]
-                    # Check stop_reason first: a refusal or a truncated response
-                    # can still carry partial text that must not be shown or billed.
-                    if message.stop_reason == "refusal":
-                        error = (
-                            "入力内容がAIの安全基準により処理を拒否されました。"
-                            "内容をご確認のうえ、再度お試しください。"
-                        )
-                    elif message.stop_reason == "max_tokens" or not text_blocks:
-                        error = "AIからの応答を取得できませんでした。もう一度お試しください。"
-                    else:
-                        raw = "\n".join(text_blocks)
-                        summary = parse_summary(raw)
-                        result = summary_to_markdown(summary) if summary else raw
-                        # Only consume a use once we actually have a result.
+                    summary, result, error, _ = summarize(transcript)
+                    # Only consume a use once we actually have a result.
+                    if result:
                         if used_code:
                             redeem_code(access_code)
                         else:
