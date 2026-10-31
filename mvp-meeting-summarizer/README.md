@@ -65,3 +65,15 @@ python eval/run_eval.py --save eval/results.json             # 出力を保存
     python eval/run_eval.py --save eval/high.json
     CLAUDE_EFFORT=medium python eval/run_eval.py --save eval/medium.json
     ```
+
+## Stripe Webhook(推奨)
+支払い直後にタブを閉じられても、コードが発行・記録されるようにする。
+
+1. Stripe ダッシュボード → 開発者 → Webhook → エンドポイントを追加
+   - URL: `https://<本番のドメイン>/stripe/webhook`
+   - イベント: `checkout.session.completed` と `checkout.session.async_payment_succeeded`(コンビニ払いなど後から支払いが確定する方法用)
+2. 表示される署名シークレット(`whsec_...`)を Render の環境変数 `STRIPE_WEBHOOK_SECRET` に設定
+
+- 未設定なら `/stripe/webhook` は 404 で、従来どおり購入完了ページを開いた時点でコードを発行する
+- 購入完了ページと Webhook のどちらが先に来ても、何度来ても、コードは1つだけ
+- 「コードが分からない」という問い合わせには、Stripe ダッシュボードで該当の支払いを開き、メタデータの `access_code` を見れば答えられる

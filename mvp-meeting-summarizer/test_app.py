@@ -873,3 +873,100 @@ def test_waitlist_ignores_duplicate_email_case_insensitively(client):
     r = client.post("/waitlist", data={"email": "taro@example.com"})
     assert "申し込みありがとうございます" in r.data.decode("utf-8")  # don't reveal it exists
     assert len(app_module._read_csv(app_module.WAITLIST_FILE)) == 1
+
+
+# --- Stripe webhook ---------------------------------------------------------------------
+
+import hashlib as _hashlib
+import hmac as _hmac
+import json as _json2
+import time as _time2
+
+WEBHOOK_SECRET = "whsec_test_secret"
+
+
+def _webhook(client, session, event_type="checkout.session.completed", secret=WEBHOOK_SECRET):
+    payload = _json2.dumps(
+        {
+            "id": "evt_test",
+            "object": "event",
+            "type": event_type,
+            "data": {"object": {"object": "checkout.session", **session}},
+        }
+    )
+    t = int(_time2.time())
+    sig = _hmac.new(secret.encode(), f"{t}.{payload}".encode(), _hashlib.sha256).hexdigest()
+    return client.post(
+        "/stripe/webhook",
+        data=payload,
+        headers={"Stripe-Signature": f"t={t},v1={sig}", "Content-Type": "application/json"},
+    )
+
+
+PAID = {"id": "cs_hook_1", "payment_status": "paid", "payment_intent": "pi_hook_1"}
+
+
+def test_webhook_disabled_without_secret(client, monkeypatch):
+    monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
+    assert _webhook(client, PAID).status_code == 404
+
+
+def test_webhook_rejects_bad_signature(client, monkeypatch):
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    assert _webhook(client, PAID, secret="whsec_wrong").status_code == 400
+    assert app_module.find_access_code_by_session("cs_hook_1") is None
+
+
+def test_webhook_issues_code_and_success_page_shows_the_same_one(
+    client, monkeypatch, no_real_stripe_calls
+):
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    assert _webhook(client, PAID).status_code == 200
+    code = app_module.find_access_code_by_session("cs_hook_1")["code"]
+    assert no_real_stripe_calls.modify.call_args.args[0] == "pi_hook_1"
+    assert no_real_stripe_calls.modify.call_args.kwargs["metadata"]["access_code"] == code
+
+    with patch.object(
+        app_module.stripe.checkout.Session,
+        "retrieve",
+        return_value=SimpleNamespace(payment_status="paid", payment_intent="pi_hook_1"),
+    ):
+        body = client.get("/purchase/success?session_id=cs_hook_1").data.decode("utf-8")
+    assert code in body
+
+
+def test_webhook_redelivery_does_not_mint_a_second_code(client, monkeypatch):
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    _webhook(client, PAID)
+    _webhook(client, PAID)
+    assert len(app_module._read_csv(app_module.ACCESS_CODES_FILE)) == 1
+
+
+def test_webhook_waits_for_async_payment_to_succeed(client, monkeypatch):
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    pending = {**PAID, "id": "cs_konbini", "payment_status": "unpaid"}
+    assert _webhook(client, pending).status_code == 200
+    assert app_module.find_access_code_by_session("cs_konbini") is None
+    paid = {**pending, "payment_status": "paid"}
+    _webhook(client, paid, event_type="checkout.session.async_payment_succeeded")
+    assert app_module.find_access_code_by_session("cs_konbini") is not None
+
+
+def test_success_page_restores_code_from_payment_intent_without_search(
+    client, no_real_stripe_calls
+):
+    """After a wipe the PaymentIntent we already fetched is enough; Search
+    can lag up to a minute behind."""
+    pi = SimpleNamespace(
+        status="succeeded",
+        metadata={"access_code": "GJK-HOOKED01", "remaining_uses": "9", "checkout_session_id": "cs_w"},
+    )
+    with patch.object(
+        app_module.stripe.checkout.Session,
+        "retrieve",
+        return_value=SimpleNamespace(payment_status="paid", payment_intent="pi_w"),
+    ), patch.object(app_module.stripe.PaymentIntent, "retrieve", return_value=pi):
+        body = client.get("/purchase/success?session_id=cs_w").data.decode("utf-8")
+    assert "GJK-HOOKED01" in body
+    no_real_stripe_calls.search.assert_not_called()
+    assert app_module.find_access_code_row("GJK-HOOKED01")["remaining_uses"] == "9"
