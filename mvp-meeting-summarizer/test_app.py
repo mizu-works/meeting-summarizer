@@ -588,3 +588,27 @@ def test_subtitles_are_cleaned_before_length_check_and_api_call(client):
     sent = create.call_args.kwargs["messages"][0]["content"]
     assert "-->" not in sent
     assert sent.startswith("高橋: はい はい")
+
+
+# --- Public-facing polish ------------------------------------------------------
+
+
+def test_oversized_request_shows_japanese_error_page(client):
+    big = "あ" * (app_module.app.config["MAX_CONTENT_LENGTH"] // 3 + 10)
+    r = client.post("/", data={"transcript": big})
+    assert r.status_code == 413
+    body = r.data.decode("utf-8")
+    assert "ファイルが大きすぎます" in body
+    assert 'id="summarize-form"' in body  # user can try again on the same page
+
+
+def test_index_has_share_metadata(client):
+    body = client.get("/").data.decode("utf-8")
+    assert 'name="description"' in body
+    assert 'property="og:title"' in body
+    assert 'content="http://localhost/"' in body
+
+
+def test_robots_txt(client):
+    r = client.get("/robots.txt")
+    assert r.status_code == 200 and "Allow: /" in r.data.decode("utf-8")
