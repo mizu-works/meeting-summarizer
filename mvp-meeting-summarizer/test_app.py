@@ -712,3 +712,78 @@ def test_code_use_is_refunded_when_response_is_truncated(client):
     ):
         client.post("/", data={"transcript": SAMPLE_TRANSCRIPT, "access_code": code})
     assert app_module.find_access_code_row(code)["remaining_uses"] == "3"
+
+
+# --- Admin page -----------------------------------------------------------------
+
+import base64 as _b64
+
+
+def _auth(password):
+    token = _b64.b64encode(f"admin:{password}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
+
+
+def test_admin_does_not_exist_without_password(client, monkeypatch):
+    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+    assert client.get("/admin").status_code == 404
+
+
+def test_admin_requires_correct_password(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "s3cret")
+    assert client.get("/admin").status_code == 401
+    assert client.get("/admin", headers=_auth("wrong")).status_code == 401
+    assert client.get("/admin/download/waitlist.csv", headers=_auth("wrong")).status_code == 401
+    assert client.get("/admin", headers=_auth("s3cret")).status_code == 200
+
+
+def test_usage_is_logged_without_transcript_text(client):
+    usage = SimpleNamespace(input_tokens=1200, output_tokens=300)
+    ok = SimpleNamespace(content=[text_block("OK")], stop_reason="end_turn", usage=usage)
+    with patch.object(app_module.client.messages, "create", return_value=ok):
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    with patch.object(app_module.client.messages, "create", side_effect=RuntimeError("boom")):
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    with patch.object(
+        app_module.client.messages, "create", return_value=fake_message([], stop_reason="refusal")
+    ):
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+
+    with open(app_module.USAGE_LOG_FILE, encoding="utf-8") as f:
+        content = f.read()
+    assert "田中" not in content  # transcript text is never stored
+    rows = app_module._read_csv(app_module.USAGE_LOG_FILE)
+    assert [r["outcome"] for r in rows] == ["unparsed", "error", "refusal"]
+    assert rows[0]["input_tokens"] == "1200" and rows[0]["plan"] == "free"
+
+
+def test_admin_page_shows_month_stats(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "pw")
+    data = '{"summary": "s", "decisions": [], "todos": []}'
+    usage = SimpleNamespace(input_tokens=1_000_000, output_tokens=100_000)
+    ok = SimpleNamespace(content=[text_block(data)], stop_reason="end_turn", usage=usage)
+    with patch.object(app_module.client.messages, "create", return_value=ok):
+        client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    client.post("/waitlist", data={"email": "a@example.com"})
+    app_module.create_access_code("sess_admin", uses=10)
+
+    stats = app_module.admin_stats()
+    assert stats["month_counts"]["ok"] == 1
+    assert stats["cost_usd"] == pytest.approx(3.0)  # $2/M in + $10/M out for Sonnet 5
+    assert stats["codes_sold"] == 1 and stats["uses_remaining"] == 10
+    assert stats["waitlist_count"] == 1
+    body = client.get("/admin", headers=_auth("pw")).data.decode("utf-8")
+    assert "$3.00" in body
+
+
+def test_admin_download_waitlist_and_reject_other_files(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "pw")
+    client.post("/waitlist", data={"email": "a@example.com"})
+    r = client.get("/admin/download/waitlist.csv", headers=_auth("pw"))
+    assert r.status_code == 200 and "a@example.com" in r.data.decode("utf-8")
+    assert client.get("/admin/download/access_codes.csv", headers=_auth("pw")).status_code == 404
+    assert client.get("/admin/download/..%2Fapp.py", headers=_auth("pw")).status_code == 404
+
+
+def test_robots_disallows_admin(client):
+    assert "Disallow: /admin" in client.get("/robots.txt").data.decode("utf-8")

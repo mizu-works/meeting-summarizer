@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>管理 | 議事録AI</title>
+  <style>
+    body { font-family: sans-serif; max-width: 860px; margin: 32px auto; padding: 0 16px; color: #222; }
+    h1 { font-size: 1.3rem; }
+    h2 { font-size: 1.05rem; margin-top: 28px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+    .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+    .tile { background: #f6f6f6; border-radius: 8px; padding: 12px; }
+    .tile .label { font-size: 0.8rem; color: #666; }
+    .tile .value { font-size: 1.4rem; font-weight: bold; margin-top: 4px; }
+    .tile .sub { font-size: 0.75rem; color: #888; margin-top: 2px; }
+    table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+    th, td { padding: 4px 6px; border-bottom: 1px solid #eee; text-align: left; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; width: 3em; }
+    .bar { display: inline-block; height: 10px; background: #1a5fb4; border-radius: 2px; vertical-align: middle; }
+    .bar.failed { background: #c01c28; }
+    .warn { color: #b00020; }
+    .note { color: #666; font-size: 0.8rem; }
+    a { color: #1a5fb4; }
+  </style>
+</head>
+<body>
+  <h1>管理ページ</h1>
+  <p class="note">モデル: {{ s.model }} ・ 日時はUTC ・ <code>data/</code> は再デプロイで消えるので、必要ならCSVを先にダウンロードしてください。</p>
+
+  <h2>{{ s.month }} の利用</h2>
+  <div class="tiles">
+    <div class="tile">
+      <div class="label">成功した要約</div>
+      <div class="value">{{ s.month_counts.ok + s.month_counts.unparsed }}</div>
+      <div class="sub">無料 {{ s.month_counts.plan_free }} ・ 有料 {{ s.month_counts.plan_code }}</div>
+    </div>
+    <div class="tile">
+      <div class="label">失敗</div>
+      {% set failed = s.month_total - s.month_counts.ok - s.month_counts.unparsed %}
+      <div class="value {% if failed %}warn{% endif %}">{{ failed }}</div>
+      <div class="sub">エラー {{ s.month_counts.error }} ・ 拒否 {{ s.month_counts.refusal }} ・ 途中切れ {{ s.month_counts.truncated }}</div>
+    </div>
+    <div class="tile">
+      <div class="label">API費用(推定)</div>
+      <div class="value">${{ "%.2f"|format(s.cost_usd) }}</div>
+      <div class="sub">入力 {{ "{:,}".format(s.tokens_in) }} ・ 出力 {{ "{:,}".format(s.tokens_out) }} tokens</div>
+    </div>
+    <div class="tile">
+      <div class="label">処理時間(中央値)</div>
+      <div class="value">{% if s.median_seconds is not none %}{{ "%.0f"|format(s.median_seconds) }}秒{% else %}-{% endif %}</div>
+      <div class="sub">最長 {% if s.slowest_seconds is not none %}{{ "%.0f"|format(s.slowest_seconds) }}秒{% else %}-{% endif %}</div>
+    </div>
+    <div class="tile">
+      <div class="label">形式崩れ(JSON不正)</div>
+      <div class="value {% if s.month_counts.unparsed %}warn{% endif %}">{{ s.month_counts.unparsed }}</div>
+      <div class="sub">0 が正常。増えたら eval を実行</div>
+    </div>
+  </div>
+
+  <h2>販売</h2>
+  <div class="tiles">
+    <div class="tile"><div class="label">発行済みコード</div><div class="value">{{ s.codes_sold }}</div><div class="sub">今月 {{ s.codes_this_month }}</div></div>
+    <div class="tile"><div class="label">未使用の残り回数</div><div class="value">{{ s.uses_remaining }}</div><div class="sub">全コード合計</div></div>
+    <div class="tile"><div class="label">ウェイトリスト</div><div class="value">{{ s.waitlist_count }}</div><div class="sub"><a href="/admin/download/waitlist.csv">CSVをダウンロード</a></div></div>
+  </div>
+
+  <h2>直近14日</h2>
+  <table>
+    <thead><tr><th>日付</th><th class="num">成功</th><th class="num">無料</th><th class="num">有料</th><th class="num">失敗</th><th></th></tr></thead>
+    <tbody>
+      {% for day, c in s.days|reverse %}
+      <tr>
+        <td>{{ day }}</td>
+        <td class="num">{{ c.ok }}</td>
+        <td class="num">{{ c.free }}</td>
+        <td class="num">{{ c.code }}</td>
+        <td class="num {% if c.failed %}warn{% endif %}">{{ c.failed }}</td>
+        <td>
+          <span class="bar" style="width: {{ (c.ok / s.max_daily * 300)|round|int }}px"></span><span class="bar failed" style="width: {{ (c.failed / s.max_daily * 300)|round|int }}px"></span>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="note"><a href="/admin/download/usage_log.csv">利用ログをCSVでダウンロード</a>(文字起こしの内容は記録していません。日時・文字数・処理時間・結果・トークン数のみ)</p>
+</body>
+</html>

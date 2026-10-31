@@ -1,17 +1,21 @@
 import csv
+import hmac
 import json
 import os
 import re
 import secrets
 import string
 import threading
+import time
+from collections import Counter
+from datetime import timedelta
 from functools import wraps
 from datetime import datetime, timezone
 
 import stripe
 from anthropic import Anthropic
 from dotenv import load_dotenv
-from flask import Flask, render_template, request
+from flask import Flask, Response, abort, render_template, request
 
 load_dotenv()
 
@@ -25,6 +29,11 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 WAITLIST_FILE = os.path.join(DATA_DIR, "waitlist.csv")
 ACCESS_CODES_FILE = os.path.join(DATA_DIR, "access_codes.csv")
 FREE_USAGE_FILE = os.path.join(DATA_DIR, "free_usage.csv")
+# One row per summarize attempt, for the admin page. Never holds transcript text.
+USAGE_LOG_FILE = os.path.join(DATA_DIR, "usage_log.csv")
+USAGE_LOG_FIELDS = ["timestamp", "plan", "chars", "seconds", "outcome", "input_tokens", "output_tokens"]
+# USD per million tokens (input, output) for the admin page's cost estimate.
+MODEL_PRICES = {"claude-sonnet-5": (2.00, 10.00), "claude-sonnet-5-5": (2.00, 10.00)}
 FREE_MONTHLY_LIMIT = 5
 PACK_USES = 10
 MAX_TRANSCRIPT_CHARS = 50000
@@ -435,6 +444,40 @@ def summarize(transcript):
     return summary, (summary_to_markdown(summary) if summary else raw), None, message
 
 
+def _outcome(message, result, summary):
+    if message is None:
+        return "error"
+    if message.stop_reason == "refusal":
+        return "refusal"
+    if message.stop_reason == "max_tokens":
+        return "truncated"
+    if not result:
+        return "empty"
+    return "ok" if summary else "unparsed"
+
+
+@_locked
+def log_usage(plan, chars, seconds, outcome, message=None):
+    usage = getattr(message, "usage", None)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    is_new_file = not os.path.exists(USAGE_LOG_FILE)
+    with open(USAGE_LOG_FILE, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if is_new_file:
+            writer.writerow(USAGE_LOG_FIELDS)
+        writer.writerow(
+            [
+                datetime.now(timezone.utc).isoformat(),
+                plan,
+                chars,
+                round(seconds, 1),
+                outcome,
+                getattr(usage, "input_tokens", 0) or 0,
+                getattr(usage, "output_tokens", 0) or 0,
+            ]
+        )
+
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     result = None
@@ -477,10 +520,19 @@ def index():
                     )
 
             if used_code or free_token:
+                started = time.monotonic()
+                message = None
                 try:
-                    summary, result, error, _ = summarize(transcript)
+                    summary, result, error, message = summarize(transcript)
                 except Exception:
                     error = "処理中にエラーが発生しました。時間をおいて再度お試しください。"
+                log_usage(
+                    plan="code" if used_code else "free",
+                    chars=len(transcript),
+                    seconds=time.monotonic() - started,
+                    outcome=_outcome(message, result, summary),
+                    message=message,
+                )
                 if not result:
                     if used_code:
                         refund_code(access_code)
@@ -620,9 +672,106 @@ def request_too_large(e):
     )
 
 
+# --- Admin page ----------------------------------------------------------------
+
+
+def _read_csv(path):
+    if not os.path.exists(path):
+        return []
+    with DATA_LOCK, open(path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def _require_admin():
+    """404 when no ADMIN_PASSWORD is set, so the page doesn't exist at all."""
+    password = os.environ.get("ADMIN_PASSWORD", "")
+    if not password:
+        abort(404)
+    auth = request.authorization
+    supplied = (auth.password or "") if auth else ""
+    if not hmac.compare_digest(supplied.encode(), password.encode()):
+        return Response(
+            "認証が必要です", 401, {"WWW-Authenticate": 'Basic realm="admin", charset="UTF-8"'}
+        )
+    return None
+
+
+def admin_stats(now=None):
+    now = now or datetime.now(timezone.utc)
+    log = _read_csv(USAGE_LOG_FILE)
+    month = now.strftime("%Y-%m")
+    days = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(13, -1, -1)]
+
+    daily = {d: Counter() for d in days}
+    this_month = Counter()
+    in_tok = out_tok = 0
+    seconds = []
+    for row in log:
+        day, outcome = row["timestamp"][:10], row["outcome"]
+        if day in daily:
+            daily[day]["ok" if outcome in ("ok", "unparsed") else "failed"] += 1
+            daily[day][row["plan"]] += outcome in ("ok", "unparsed")
+        if row["timestamp"][:7] == month:
+            this_month[outcome] += 1
+            this_month["plan_" + row["plan"]] += outcome in ("ok", "unparsed")
+            in_tok += int(row["input_tokens"] or 0)
+            out_tok += int(row["output_tokens"] or 0)
+            if outcome in ("ok", "unparsed"):
+                seconds.append(float(row["seconds"] or 0))
+
+    price_in, price_out = MODEL_PRICES.get(MODEL, (0, 0))
+    codes = _read_csv(ACCESS_CODES_FILE)
+    seconds.sort()
+    return {
+        "days": [(d, daily[d]) for d in days],
+        "max_daily": max([daily[d]["ok"] + daily[d]["failed"] for d in days] + [1]),
+        "month": month,
+        "month_counts": this_month,
+        "month_total": sum(v for k, v in this_month.items() if not k.startswith("plan_")),
+        "tokens_in": in_tok,
+        "tokens_out": out_tok,
+        "cost_usd": in_tok / 1e6 * price_in + out_tok / 1e6 * price_out,
+        "median_seconds": seconds[len(seconds) // 2] if seconds else None,
+        "slowest_seconds": seconds[-1] if seconds else None,
+        "codes_sold": len(codes),
+        "codes_this_month": sum(1 for c in codes if c["created_at"][:7] == month),
+        "uses_remaining": sum(int(c["remaining_uses"]) for c in codes),
+        "waitlist_count": len(_read_csv(WAITLIST_FILE)),
+        "model": MODEL,
+    }
+
+
+@app.route("/admin")
+def admin():
+    denied = _require_admin()
+    if denied:
+        return denied
+    return render_template("admin.html", s=admin_stats())
+
+
+ADMIN_DOWNLOADS = {"waitlist.csv": WAITLIST_FILE, "usage_log.csv": USAGE_LOG_FILE}
+
+
+@app.route("/admin/download/<name>")
+def admin_download(name):
+    denied = _require_admin()
+    if denied:
+        return denied
+    path = ADMIN_DOWNLOADS.get(name)
+    if path is None or not os.path.exists(path):
+        abort(404)
+    with DATA_LOCK, open(path, "rb") as f:
+        data = f.read()
+    return Response(
+        data,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={name}"},
+    )
+
+
 @app.route("/robots.txt")
 def robots():
-    return "User-agent: *\nAllow: /\n", 200, {"Content-Type": "text/plain; charset=utf-8"}
+    return "User-agent: *\nAllow: /\nDisallow: /admin\n", 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 
 @app.route("/privacy")
