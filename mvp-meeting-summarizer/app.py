@@ -1,6 +1,7 @@
 import csv
+import json
 import os
-import random
+import secrets
 import string
 from datetime import datetime, timezone
 
@@ -21,6 +22,7 @@ ACCESS_CODES_FILE = os.path.join(DATA_DIR, "access_codes.csv")
 FREE_USAGE_FILE = os.path.join(DATA_DIR, "free_usage.csv")
 FREE_MONTHLY_LIMIT = 5
 PACK_USES = 10
+MAX_TRANSCRIPT_CHARS = 50000
 
 
 def get_client_ip():
@@ -57,7 +59,11 @@ def record_free_use(ip):
 
 def generate_access_code():
     chars = string.ascii_uppercase + string.digits
-    return "GJK-" + "".join(random.choices(chars, k=8))
+    return "GJK-" + "".join(secrets.choice(chars) for _ in range(8))
+
+
+def normalize_code(code):
+    return (code or "").strip().upper()
 
 
 def find_access_code_by_session(session_id):
@@ -85,18 +91,20 @@ def create_access_code(session_id, uses=PACK_USES):
 
 def code_has_remaining_uses(code):
     """Check validity without consuming a use."""
+    code = normalize_code(code)
     if not code or not os.path.exists(ACCESS_CODES_FILE):
         return False
     with open(ACCESS_CODES_FILE, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            if row["code"] == code.strip() and int(row["remaining_uses"]) > 0:
+            if row["code"] == code and int(row["remaining_uses"]) > 0:
                 return True
     return False
 
 
 def redeem_code(code):
     """Validate a code and consume one use. Returns True if a use was consumed."""
+    code = normalize_code(code)
     if not code or not os.path.exists(ACCESS_CODES_FILE):
         return False
     rows = []
@@ -105,7 +113,7 @@ def redeem_code(code):
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames
         for row in reader:
-            if row["code"] == code.strip() and int(row["remaining_uses"]) > 0:
+            if not consumed and row["code"] == code and int(row["remaining_uses"]) > 0:
                 row["remaining_uses"] = str(int(row["remaining_uses"]) - 1)
                 consumed = True
             rows.append(row)
@@ -117,22 +125,82 @@ def redeem_code(code):
     return consumed
 
 SYSTEM_PROMPT = """あなたは商談・面談の文字起こしから重要情報を抽出するアシスタントです。
-入力されたテキストを読み、以下の3セクションで日本語で出力してください。他の説明は書かないでください。
+入力されたテキストを読み、指定のJSON形式で日本語で出力してください。
 
-## 要約
-(3〜5行で会話全体の要点をまとめる)
+- summary: 会話全体の要点を3〜5行でまとめた文章
+- decisions: 会話の中で決まったこと。なければ空配列
+- todos: 会話の後に誰かがやるべきこと(ToDo)。1件につき1つの具体的な作業にする
+  - task: 何をするか(「〜する」で終わる短い文)
+  - owner: 担当者。本文から分からなければ空文字
+  - due: 期限。本文の表現のまま(例: 「来週金曜」「10/31」)。分からなければ空文字
+  ToDoがなければ空配列
 
-## 決定事項
-- (箇条書き。決定事項がなければ「特になし」)
-
-## Next Action
-- (担当者・期限が本文にあれば含めて箇条書き。なければ「特になし」)
+本文に書かれていない担当者や期限を推測で埋めないでください。
 """
+
+SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "decisions": {"type": "array", "items": {"type": "string"}},
+        "todos": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"},
+                    "owner": {"type": "string"},
+                    "due": {"type": "string"},
+                },
+                "required": ["task", "owner", "due"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["summary", "decisions", "todos"],
+    "additionalProperties": False,
+}
+
+
+def parse_summary(text):
+    """Parse the model's JSON output. Returns None if it isn't the expected shape."""
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("summary"), str):
+        return None
+    decisions = [d for d in data.get("decisions") or [] if isinstance(d, str) and d.strip()]
+    todos = []
+    for t in data.get("todos") or []:
+        if isinstance(t, dict) and str(t.get("task", "")).strip():
+            todos.append(
+                {
+                    "task": str(t.get("task", "")).strip(),
+                    "owner": str(t.get("owner", "")).strip(),
+                    "due": str(t.get("due", "")).strip(),
+                }
+            )
+    return {"summary": data["summary"].strip(), "decisions": decisions, "todos": todos}
+
+
+def summary_to_markdown(s):
+    lines = ["## 要約", s["summary"], "", "## 決定事項"]
+    lines += [f"- {d}" for d in s["decisions"]] or ["- 特になし"]
+    lines += ["", "## ToDo"]
+    if not s["todos"]:
+        lines.append("- 特になし")
+    for t in s["todos"]:
+        meta = [f"担当: {t['owner']}" if t["owner"] else "", f"期限: {t['due']}" if t["due"] else ""]
+        meta = " / ".join(m for m in meta if m)
+        lines.append(f"- [ ] {t['task']}" + (f"({meta})" if meta else ""))
+    return "\n".join(lines)
 
 
 @app.route("/", methods=["GET", "POST"])
 def index():
     result = None
+    summary = None
     error = None
     transcript = ""
     access_code = ""
@@ -145,6 +213,11 @@ def index():
 
         if not transcript:
             error = "テキストを貼り付けてください。"
+        elif len(transcript) > MAX_TRANSCRIPT_CHARS:
+            error = (
+                f"テキストが長すぎます({len(transcript):,}文字)。"
+                f"{MAX_TRANSCRIPT_CHARS:,}文字以内に分けて貼り付けてください。"
+            )
         else:
             allowed = False
             used_code = False
@@ -164,29 +237,38 @@ def index():
 
             if allowed:
                 try:
+                    # Sonnet 5 thinks by default and thinking tokens count toward
+                    # max_tokens, so a small cap truncates the actual answer.
                     message = client.messages.create(
                         model="claude-sonnet-5",
-                        max_tokens=1024,
+                        max_tokens=16000,
                         system=SYSTEM_PROMPT,
                         messages=[{"role": "user", "content": transcript}],
+                        output_config={
+                            "format": {"type": "json_schema", "schema": SUMMARY_SCHEMA}
+                        },
                     )
                     text_blocks = [
                         block.text for block in message.content if block.type == "text"
                     ]
-                    if text_blocks:
-                        result = "\n".join(text_blocks)
+                    # Check stop_reason first: a refusal or a truncated response
+                    # can still carry partial text that must not be shown or billed.
+                    if message.stop_reason == "refusal":
+                        error = (
+                            "入力内容がAIの安全基準により処理を拒否されました。"
+                            "内容をご確認のうえ、再度お試しください。"
+                        )
+                    elif message.stop_reason == "max_tokens" or not text_blocks:
+                        error = "AIからの応答を取得できませんでした。もう一度お試しください。"
+                    else:
+                        raw = "\n".join(text_blocks)
+                        summary = parse_summary(raw)
+                        result = summary_to_markdown(summary) if summary else raw
                         # Only consume a use once we actually have a result.
                         if used_code:
                             redeem_code(access_code)
                         else:
                             record_free_use(ip)
-                    elif message.stop_reason == "refusal":
-                        error = (
-                            "入力内容がAIの安全基準により処理を拒否されました。"
-                            "内容をご確認のうえ、再度お試しください。"
-                        )
-                    else:
-                        error = "AIからの応答を取得できませんでした。もう一度お試しください。"
                 except Exception:
                     error = "処理中にエラーが発生しました。時間をおいて再度お試しください。"
 
@@ -195,12 +277,20 @@ def index():
     return render_template(
         "index.html",
         result=result,
+        summary=summary,
         error=error,
         transcript=transcript,
         access_code=access_code,
         remaining_free=max(remaining_free, 0),
         free_limit=FREE_MONTHLY_LIMIT,
     )
+
+
+def csv_safe(value):
+    """Stop spreadsheet apps from running user input as a formula when the CSV is opened."""
+    if value and value[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
 
 
 @app.route("/waitlist", methods=["GET", "POST"])
@@ -223,7 +313,12 @@ def waitlist():
                 if is_new_file:
                     writer.writerow(["timestamp", "email", "role", "note"])
                 writer.writerow(
-                    [datetime.now(timezone.utc).isoformat(), email, role, note]
+                    [
+                        datetime.now(timezone.utc).isoformat(),
+                        csv_safe(email),
+                        csv_safe(role),
+                        csv_safe(note),
+                    ]
                 )
             submitted = True
 

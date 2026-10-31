@@ -14,6 +14,17 @@
     .quota { color: #1a5fb4; font-size: 0.85rem; margin-top: 4px; }
     .access-code { margin-top: 12px; }
     .access-code input { padding: 6px; font-size: 0.9rem; width: 200px; }
+    .summary { background: #f6f6f6; padding: 8px 16px 16px; border-radius: 8px; margin-top: 24px; line-height: 1.6; }
+    .summary h2 { font-size: 1.05rem; margin: 16px 0 6px; }
+    .summary-text { white-space: pre-wrap; margin: 0; }
+    .summary .empty { color: #666; margin: 0; }
+    table.todos { width: 100%; border-collapse: collapse; background: #fff; font-size: 0.92rem; }
+    table.todos th, table.todos td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
+    table.todos th { background: #eee; font-weight: normal; color: #444; }
+    table.todos td:first-child, table.todos th:first-child { width: 28px; text-align: center; }
+    table.todos tr:has(input:checked) td:not(:first-child) { text-decoration: line-through; color: #888; }
+    .actions { margin-top: 12px; }
+    .actions button { margin: 0 8px 0 0; padding: 6px 14px; font-size: 0.9rem; }
     footer { margin-top: 40px; font-size: 0.8rem; color: #888; }
     footer a { color: #888; }
   </style>
@@ -42,7 +53,76 @@
   <div class="error">{{ error }}</div>
   {% endif %}
 
-  {% if result %}
+  {% if summary %}
+  <div class="summary">
+    <h2>要約</h2>
+    <p class="summary-text">{{ summary.summary }}</p>
+
+    <h2>決定事項</h2>
+    {% if summary.decisions %}
+    <ul>
+      {% for d in summary.decisions %}<li>{{ d }}</li>{% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty">特になし</p>
+    {% endif %}
+
+    <h2>ToDo({{ summary.todos|length }}件)</h2>
+    {% if summary.todos %}
+    <table class="todos">
+      <thead><tr><th></th><th>やること</th><th>担当</th><th>期限</th></tr></thead>
+      <tbody>
+        {% for t in summary.todos %}
+        <tr>
+          <td><input type="checkbox" aria-label="完了"></td>
+          <td>{{ t.task }}</td>
+          <td>{{ t.owner or "未定" }}</td>
+          <td>{{ t.due or "未定" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="empty">特になし</p>
+    {% endif %}
+
+    <div class="actions">
+      <button type="button" id="copy-md">Markdownでコピー</button>
+      {% if summary.todos %}<button type="button" id="download-csv">ToDoをCSVで保存</button>{% endif %}
+      <span id="copy-status" class="note"></span>
+    </div>
+  </div>
+  <script id="result-markdown" type="application/json">{{ result|tojson }}</script>
+  <script id="todos-data" type="application/json">{{ summary.todos|tojson }}</script>
+  <script>
+    document.getElementById("copy-md").addEventListener("click", function () {
+      var text = JSON.parse(document.getElementById("result-markdown").textContent);
+      var status = document.getElementById("copy-status");
+      navigator.clipboard.writeText(text).then(
+        function () { status.textContent = "コピーしました"; },
+        function () { status.textContent = "コピーできませんでした"; }
+      );
+    });
+    var csvButton = document.getElementById("download-csv");
+    if (csvButton) {
+      csvButton.addEventListener("click", function () {
+        var todos = JSON.parse(document.getElementById("todos-data").textContent);
+        var cell = function (v) { return '"' + String(v).replace(/"/g, '""') + '"'; };
+        var rows = [["やること", "担当", "期限"]].concat(
+          todos.map(function (t) { return [t.task, t.owner, t.due]; })
+        );
+        var csv = rows.map(function (r) { return r.map(cell).join(","); }).join("\r\n");
+        // BOM so Excel opens the Japanese text correctly
+        var blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "todo.csv";
+        a.click();
+        URL.revokeObjectURL(a.href);
+      });
+    }
+  </script>
+  {% elif result %}
   <div class="result">{{ result }}</div>
   {% endif %}
 

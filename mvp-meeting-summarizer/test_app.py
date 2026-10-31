@@ -263,3 +263,129 @@ def test_waitlist_accepts_valid_submission(client):
 def test_privacy_and_terms_pages_load(client):
     assert client.get("/privacy").status_code == 200
     assert client.get("/terms").status_code == 200
+
+
+# --- Structured summary / ToDo extraction ------------------------------------
+
+import json as _json
+
+STRUCTURED = _json.dumps(
+    {
+        "summary": "来週の件が決定した。",
+        "decisions": ["来週の件を進める"],
+        "todos": [
+            {"task": "見積書を送付する", "owner": "田中", "due": "来週金曜"},
+            {"task": "日程を調整する", "owner": "", "due": ""},
+        ],
+    },
+    ensure_ascii=False,
+)
+
+
+def test_structured_output_renders_todo_table(client):
+    with patch.object(
+        app_module.client.messages,
+        "create",
+        return_value=fake_message([thinking_block(), text_block(STRUCTURED)]),
+    ) as create:
+        r = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    body = r.data.decode("utf-8")
+    assert "見積書を送付する" in body
+    assert "来週金曜" in body
+    assert "ToDo(2件)" in body
+    assert "未定" in body  # missing owner/due shown as 未定, not guessed
+    assert "download-csv" in body
+    # JSON schema is requested from the API
+    assert create.call_args.kwargs["output_config"]["format"]["type"] == "json_schema"
+
+
+def test_summary_to_markdown_has_checklist():
+    s = app_module.parse_summary(STRUCTURED)
+    md = app_module.summary_to_markdown(s)
+    assert "- [ ] 見積書を送付する(担当: 田中 / 期限: 来週金曜)" in md
+    assert "- [ ] 日程を調整する" in md
+
+
+def test_parse_summary_rejects_non_json():
+    assert app_module.parse_summary("## 要約\nただのテキスト") is None
+    assert app_module.parse_summary('{"foo": 1}') is None
+
+
+def test_parse_summary_drops_blank_todos():
+    s = app_module.parse_summary(
+        _json.dumps({"summary": "x", "decisions": [""], "todos": [{"task": " ", "owner": "", "due": ""}]})
+    )
+    assert s["decisions"] == [] and s["todos"] == []
+
+
+def test_empty_todos_shows_tokunashi(client):
+    data = _json.dumps({"summary": "雑談のみ", "decisions": [], "todos": []}, ensure_ascii=False)
+    with patch.object(
+        app_module.client.messages, "create", return_value=fake_message([text_block(data)])
+    ):
+        r = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    body = r.data.decode("utf-8")
+    assert "ToDo(0件)" in body
+    assert "特になし" in body
+
+
+def test_model_output_is_html_escaped(client):
+    data = _json.dumps(
+        {"summary": "<script>alert(1)</script>", "decisions": [], "todos": []}
+    )
+    with patch.object(
+        app_module.client.messages, "create", return_value=fake_message([text_block(data)])
+    ):
+        r = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    assert "<script>alert(1)</script>" not in r.data.decode("utf-8")
+
+
+# --- Review fixes -------------------------------------------------------------
+
+
+def test_truncated_response_is_error_and_not_charged(client):
+    """Thinking eats into max_tokens; a cut-off answer must not be shown or billed."""
+    with patch.object(
+        app_module.client.messages,
+        "create",
+        return_value=fake_message([text_block('{"summary": "途中')], stop_reason="max_tokens"),
+    ):
+        r = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    assert "応答を取得できません" in r.data.decode("utf-8")
+    assert app_module.count_free_uses_this_month("127.0.0.1") == 0
+
+
+def test_refusal_with_partial_text_is_not_charged(client):
+    with patch.object(
+        app_module.client.messages,
+        "create",
+        return_value=fake_message([text_block("部分的な")], stop_reason="refusal"),
+    ):
+        r = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    assert "安全基準" in r.data.decode("utf-8")
+    assert app_module.count_free_uses_this_month("127.0.0.1") == 0
+
+
+def test_overlong_transcript_is_rejected_without_api_call(client):
+    long_text = "あ" * (app_module.MAX_TRANSCRIPT_CHARS + 1)
+    with patch.object(app_module.client.messages, "create") as create:
+        r = client.post("/", data={"transcript": long_text})
+    assert "長すぎます" in r.data.decode("utf-8")
+    create.assert_not_called()
+
+
+def test_access_code_is_case_insensitive(client):
+    code = app_module.create_access_code("sess_case", uses=1)
+    assert app_module.code_has_remaining_uses(code.lower())
+    assert app_module.redeem_code(" " + code.lower() + " ")
+    assert not app_module.code_has_remaining_uses(code)
+
+
+def test_waitlist_neutralizes_csv_formulas(client):
+    client.post(
+        "/waitlist",
+        data={"email": "a@example.com", "role": "=HYPERLINK(\"x\")", "note": "ok"},
+    )
+    with open(app_module.WAITLIST_FILE, encoding="utf-8") as f:
+        content = f.read()
+    assert "'=HYPERLINK" in content
