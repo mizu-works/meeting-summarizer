@@ -389,3 +389,9 @@ def test_waitlist_neutralizes_csv_formulas(client):
     with open(app_module.WAITLIST_FILE, encoding="utf-8") as f:
         content = f.read()
     assert "'=HYPERLINK" in content
+
+
+def test_form_exposes_char_limit_and_submit_guard(client):
+    body = client.get("/").data.decode("utf-8")
+    assert f'data-max="{app_module.MAX_TRANSCRIPT_CHARS}"' in body
+    assert 'id="submit-button"' in body
