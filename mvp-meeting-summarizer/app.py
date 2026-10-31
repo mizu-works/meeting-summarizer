@@ -74,11 +74,34 @@ def record_free_use(ip):
     os.makedirs(DATA_DIR, exist_ok=True)
     is_new_file = not os.path.exists(FREE_USAGE_FILE)
     month_key = datetime.now(timezone.utc).strftime("%Y-%m")
+    timestamp = datetime.now(timezone.utc).isoformat()
     with open(FREE_USAGE_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         if is_new_file:
             writer.writerow(["ip", "month", "timestamp"])
-        writer.writerow([ip, month_key, datetime.now(timezone.utc).isoformat()])
+        writer.writerow([ip, month_key, timestamp])
+    return timestamp
+
+
+@_locked
+def reserve_free_use(ip):
+    """Take one free use before calling the API, so parallel requests can't
+    all pass the limit check. Returns a token for release_free_use, or None."""
+    if count_free_uses_this_month(ip) >= FREE_MONTHLY_LIMIT:
+        return None
+    return record_free_use(ip)
+
+
+@_locked
+def release_free_use(ip, token):
+    """Give back a reserved free use when the request didn't produce a result."""
+    if not os.path.exists(FREE_USAGE_FILE):
+        return
+    with open(FREE_USAGE_FILE, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    kept = [r for r in rows if not (len(r) >= 3 and r[0] == ip and r[2] == token)]
+    with open(FREE_USAGE_FILE, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerows(kept)
 
 
 def generate_access_code():
@@ -216,6 +239,34 @@ def redeem_code(code):
     if consumed["stripe_session_id"]:
         backup_code_to_stripe(consumed["stripe_session_id"], code, consumed["remaining_uses"])
     return True
+
+
+def refund_code(code):
+    """Give back a use taken by redeem_code when the request failed."""
+    code = normalize_code(code)
+    with DATA_LOCK:
+        row = _adjust_uses(code, +1)
+    if row is not None and row["stripe_session_id"]:
+        backup_code_to_stripe(row["stripe_session_id"], code, row["remaining_uses"])
+
+
+@_locked
+def _adjust_uses(code, delta):
+    if not os.path.exists(ACCESS_CODES_FILE):
+        return None
+    with open(ACCESS_CODES_FILE, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    target = next((r for r in rows if r["code"] == code), None)
+    if target is None:
+        return None
+    target["remaining_uses"] = str(int(target["remaining_uses"]) + delta)
+    with open(ACCESS_CODES_FILE, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return target
 
 
 def _consume_one_use(code):
@@ -406,33 +457,35 @@ def index():
                 f"{MAX_TRANSCRIPT_CHARS:,}文字以内に分けて貼り付けてください。"
             )
         else:
-            allowed = False
+            # Take the use up front (atomically) and give it back on failure;
+            # checking first and charging after let parallel requests from
+            # several tabs all slip under the limit.
+            free_token = None
             used_code = False
             if access_code:
-                if code_has_remaining_uses(access_code):
-                    allowed = True
+                # code_has_remaining_uses also restores codes wiped by a redeploy
+                if code_has_remaining_uses(access_code) and redeem_code(access_code):
                     used_code = True
                 else:
                     error = "アクセスコードが無効か、利用回数の上限に達しています。"
-            elif count_free_uses_this_month(ip) < FREE_MONTHLY_LIMIT:
-                allowed = True
             else:
-                error = (
-                    f"無料枠(月{FREE_MONTHLY_LIMIT}回)の上限に達しました。"
-                    "アクセスコードをお持ちの場合は入力してください。"
-                )
+                free_token = reserve_free_use(ip)
+                if free_token is None:
+                    error = (
+                        f"無料枠(月{FREE_MONTHLY_LIMIT}回)の上限に達しました。"
+                        "アクセスコードをお持ちの場合は入力してください。"
+                    )
 
-            if allowed:
+            if used_code or free_token:
                 try:
                     summary, result, error, _ = summarize(transcript)
-                    # Only consume a use once we actually have a result.
-                    if result:
-                        if used_code:
-                            redeem_code(access_code)
-                        else:
-                            record_free_use(ip)
                 except Exception:
                     error = "処理中にエラーが発生しました。時間をおいて再度お試しください。"
+                if not result:
+                    if used_code:
+                        refund_code(access_code)
+                    else:
+                        release_free_use(ip, free_token)
 
         remaining_free = FREE_MONTHLY_LIMIT - count_free_uses_this_month(ip)
 
