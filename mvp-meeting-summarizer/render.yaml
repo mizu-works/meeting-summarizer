@@ -8,8 +8,10 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    # Sonnet 5 は考えてから答えるため、長い入力では gunicorn 既定の30秒を超えることがある
-    startCommand: gunicorn app:app --timeout 180
+    # Sonnet 5 は考えてから答えるため、長い入力では gunicorn 既定の30秒を超えることがある。
+    # 1リクエストが数十秒APIを待つので、スレッドで同時に捌く(既定の1スレッドだと他の人が全員待たされる)。
+    # CSVはプロセス内のロックで守っているので、workers は 1 のままにすること。
+    startCommand: gunicorn app:app --timeout 180 --workers 1 --threads 8
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
