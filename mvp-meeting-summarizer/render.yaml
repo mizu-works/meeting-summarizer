@@ -17,3 +17,6 @@ services:
         sync: false
       - key: STRIPE_SECRET_KEY
         sync: false
+      # 設定すると /admin(管理ページ)が使えるようになる。未設定なら /admin は存在しない
+      - key: ADMIN_PASSWORD
+        sync: false
