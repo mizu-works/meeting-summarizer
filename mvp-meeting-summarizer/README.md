@@ -37,3 +37,16 @@ pytest test_app.py -v
 - そのため、コードと残り回数を支払いの Stripe PaymentIntent の metadata(`access_code` / `remaining_uses` / `checkout_session_id`)にも書き込んでいる
 - ローカルに見つからないコードが入力されたら、Stripe Search API で探して復元する。追加費用なし
 - 必要な環境変数: `STRIPE_SECRET_KEY`(制限付きキーを使う場合は PaymentIntents の読み書きと Checkout Sessions の読み取り権限が必要)
+
+## 品質チェック(eval)
+プロンプト・スキーマ・モデルを変えるときは、変更の前後で実行して合格数を比べる。
+
+```
+ANTHROPIC_API_KEY=xxxxx python eval/run_eval.py              # 全ケース(数セント程度)
+python eval/run_eval.py --case zoom_vtt_raw --repeat 3       # 1ケースを3回(出力は毎回少し変わる)
+python eval/run_eval.py --save eval/results.json             # 出力を保存
+```
+
+- ケースは `eval/cases/*.json`。文字起こしと、出力が満たすべき条件(担当者・期限・件数など)を書く
+- アプリと同じ `app.summarize()` を呼ぶので、本番と同じプロンプト・モデルで確認できる
+- 条件そのものの正しさは `test_eval.py` で確認している(APIは呼ばない)
