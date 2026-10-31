@@ -510,6 +510,30 @@ def purchase_success():
     return render_template("purchase_success.html", error=None, code=code, uses=PACK_USES)
 
 
+@app.errorhandler(413)
+def request_too_large(e):
+    remaining_free = FREE_MONTHLY_LIMIT - count_free_uses_this_month(get_client_ip())
+    return (
+        render_template(
+            "index.html",
+            result=None,
+            summary=None,
+            error="ファイルが大きすぎます。2MB以下のファイルを使うか、分けて貼り付けてください。",
+            transcript="",
+            access_code="",
+            remaining_free=max(remaining_free, 0),
+            free_limit=FREE_MONTHLY_LIMIT,
+            max_chars=MAX_TRANSCRIPT_CHARS,
+        ),
+        413,
+    )
+
+
+@app.route("/robots.txt")
+def robots():
+    return "User-agent: *\nAllow: /\n", 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+
 @app.route("/privacy")
 def privacy():
     return render_template("privacy.html")
