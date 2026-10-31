@@ -19,6 +19,10 @@
     .error { color: #b00020; margin-top: 12px; }
     .note { color: #666; font-size: 0.85rem; margin-top: 8px; }
     .quota { color: #1a5fb4; font-size: 0.85rem; margin-top: 4px; }
+    .example { margin: 8px 0 16px; }
+    .example > summary { cursor: pointer; color: #1a5fb4; font-size: 0.9rem; }
+    .example-input { white-space: pre-wrap; background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px; font-size: 0.85rem; font-family: inherit; }
+    .example .summary { margin-top: 8px; }
     .access-code { margin-top: 12px; }
     .below-textarea { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
     .file-pick { font-size: 0.85rem; color: #1a5fb4; cursor: pointer; text-decoration: underline; }
@@ -38,6 +42,7 @@
     table.todos th, table.todos td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; vertical-align: top; }
     table.todos th { background: #eee; font-weight: normal; color: #444; }
     table.todos td:first-child, table.todos th:first-child { width: 28px; text-align: center; }
+    table.todos td:nth-child(3), table.todos td:nth-child(4), table.todos th { white-space: nowrap; }
     table.todos tr:has(input:checked) td:not(:first-child) { text-decoration: line-through; color: #888; }
     .actions { margin-top: 12px; }
     .actions button { margin: 0 8px 0 0; padding: 6px 14px; font-size: 0.9rem; }
@@ -55,6 +60,34 @@
     無料枠: 今月あと{{ remaining_free }}/{{ free_limit }}回利用できます。
     それ以上使いたい方は<a href="/waitlist">早期アクセス申し込み</a>からアクセスコードをご購入ください。
   </p>
+  {% if not result %}
+  <details class="example">
+    <summary>出力例を見る(無料枠は使いません)</summary>
+    <p class="note">こんな文字起こしを貼ると…</p>
+    <pre class="example-input" id="example-transcript">田中(営業): 見積書は今週金曜までにメールでお送りします。
+山本(先方): ありがとうございます。稟議は来週中に回して、結果は月末までにご連絡します。
+佐藤(田中の上司): 導入スケジュール案は私が作って、来週水曜にお送りします。
+山本: では年額契約の方向で進めましょう。</pre>
+    <p class="note">…このように整理されます。</p>
+    <div class="summary">
+      <h2>要約</h2>
+      <p class="summary-text">勤怠管理システム導入の商談。先方は年額契約の方向で合意し、見積書の送付後に社内稟議を行う。</p>
+      <h2>決定事項</h2>
+      <ul><li>年額契約の方向で進める</li></ul>
+      <h2>ToDo(3件)</h2>
+      <table class="todos">
+        <thead><tr><th></th><th>やること</th><th>担当</th><th>期限</th></tr></thead>
+        <tbody>
+          <tr><td><input type="checkbox" aria-label="完了"></td><td>見積書をメールで送付する</td><td>田中</td><td>今週金曜</td></tr>
+          <tr><td><input type="checkbox" aria-label="完了"></td><td>社内稟議を回し、結果を連絡する</td><td>山本</td><td>月末</td></tr>
+          <tr><td><input type="checkbox" aria-label="完了"></td><td>導入スケジュール案を送付する</td><td>佐藤</td><td>来週水曜</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <button type="button" id="use-example">この文字起こしで試してみる</button>
+  </details>
+  {% endif %}
+
   <form method="post" id="summarize-form">
     <textarea name="transcript" id="transcript" placeholder="Zoomの文字起こしや面談メモをここに貼り付けてください">{{ transcript }}</textarea>
     <div class="below-textarea">
@@ -90,6 +123,16 @@
       }
       textarea.addEventListener("input", updateCount);
       updateCount();
+
+      var useExample = document.getElementById("use-example");
+      if (useExample) {
+        useExample.addEventListener("click", function () {
+          textarea.value = document.getElementById("example-transcript").textContent;
+          updateCount();
+          textarea.focus();
+          textarea.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+      }
 
       // Subtitle files shrink a lot once the server strips timestamps,
       // so only plain text is held to the limit here.

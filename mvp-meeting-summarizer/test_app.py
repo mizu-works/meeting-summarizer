@@ -821,3 +821,23 @@ def test_invalid_effort_env_is_ignored(monkeypatch):
 def test_client_gives_up_before_users_do():
     assert app_module.client.timeout <= 120
     assert app_module.client.max_retries <= 1
+
+
+def test_example_output_shown_before_first_result_only(client):
+    assert "出力例を見る" in client.get("/").data.decode("utf-8")
+    with patch.object(
+        app_module.client.messages, "create", return_value=fake_message([text_block("OK")])
+    ):
+        body = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT}).data.decode("utf-8")
+    assert "出力例を見る" not in body
+
+
+def test_success_page_offers_copy_and_saves_code_for_tool_page(client):
+    with patch.object(
+        app_module.stripe.checkout.Session,
+        "retrieve",
+        return_value=SimpleNamespace(payment_status="paid"),
+    ):
+        body = client.get("/purchase/success?session_id=sess_copy").data.decode("utf-8")
+    assert 'id="copy-code"' in body
+    assert "gjk_access_code" in body
