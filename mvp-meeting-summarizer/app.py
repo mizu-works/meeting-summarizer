@@ -22,7 +22,10 @@ load_dotenv()
 app = Flask(__name__)
 # Generous for a cleaned-up hour-long subtitle file, but stops huge uploads.
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
-client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+# The SDK default is a 10-minute timeout with 2 retries; nobody waits that long
+# in a browser. Fail within a few minutes so the user sees an error and the
+# reserved use is given back.
+client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"), timeout=120.0, max_retries=1)
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -39,6 +42,14 @@ PACK_USES = 10
 MAX_TRANSCRIPT_CHARS = 50000
 MODEL = "claude-sonnet-5"
 MAX_TOKENS = 16000
+# How hard the model thinks: low / medium / high / xhigh / max. Unset keeps the
+# model default (high on Sonnet 5). Lower is faster and cheaper; compare with
+# eval/run_eval.py before changing it in production.
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+EFFORT = os.environ.get("CLAUDE_EFFORT", "").strip().lower() or None
+if EFFORT not in (None, *EFFORT_LEVELS):
+    app.logger.warning("Ignoring CLAUDE_EFFORT=%r (expected one of %s)", EFFORT, EFFORT_LEVELS)
+    EFFORT = None
 
 
 # gunicorn runs one process with several threads (see render.yaml), so every
@@ -413,6 +424,13 @@ def summary_to_markdown(s):
     return "\n".join(lines)
 
 
+def output_config():
+    config = {"format": {"type": "json_schema", "schema": SUMMARY_SCHEMA}}
+    if EFFORT:
+        config["effort"] = EFFORT
+    return config
+
+
 def summarize(transcript):
     """Call Claude and return (summary, markdown, error, message).
 
@@ -426,7 +444,7 @@ def summarize(transcript):
         max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": transcript}],
-        output_config={"format": {"type": "json_schema", "schema": SUMMARY_SCHEMA}},
+        output_config=output_config(),
     )
     text_blocks = [block.text for block in message.content if block.type == "text"]
     # Check stop_reason first: a refusal or a truncated response
@@ -738,6 +756,7 @@ def admin_stats(now=None):
         "uses_remaining": sum(int(c["remaining_uses"]) for c in codes),
         "waitlist_count": len(_read_csv(WAITLIST_FILE)),
         "model": MODEL,
+        "effort": EFFORT or "既定",
     }
 
 

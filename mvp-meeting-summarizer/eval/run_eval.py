@@ -9,6 +9,7 @@ Usage (from mvp-meeting-summarizer/):
     ANTHROPIC_API_KEY=... python eval/run_eval.py
     python eval/run_eval.py --case zoom_vtt_raw --repeat 3
     python eval/run_eval.py --save eval/results.json
+    CLAUDE_EFFORT=low python eval/run_eval.py        # compare a lower effort
 """
 
 import argparse
@@ -141,12 +142,15 @@ def main():
 
     price_in, price_out = PRICE_PER_MTOK.get(app.MODEL, (0, 0))
     cost = in_tok / 1e6 * price_in + out_tok / 1e6 * price_out
-    print(f"\n{passed}/{total} passed  model={app.MODEL}  "
+    times = sorted(r["seconds"] for r in records)
+    median = times[len(times) // 2] if times else 0
+    print(f"\n{passed}/{total} passed  model={app.MODEL} effort={app.EFFORT or 'default'}  "
+          f"median={median:.1f}s  "
           f"tokens in={in_tok:,} out={out_tok:,}  cost≈${cost:.3f}")
 
     if args.save:
         with open(args.save, "w", encoding="utf-8") as f:
-            json.dump({"model": app.MODEL, "passed": passed, "total": total, "records": records},
+            json.dump({"model": app.MODEL, "effort": app.EFFORT, "passed": passed, "total": total, "records": records},
                       f, ensure_ascii=False, indent=2)
         print(f"saved: {args.save}")
     sys.exit(0 if passed == total else 1)
