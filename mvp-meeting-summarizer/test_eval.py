@@ -59,6 +59,13 @@ IDEAL = {
         decisions=["来期予算案は前年比5%増で提出する"],
         todos=[todo("予算案の資料をまとめる", "岡田", "来週月曜")],
     ),
+    "relative_dates": out(
+        todos=[
+            todo("見積書を送る", "石井", "来週月曜(11/2)"),
+            todo("契約書のドラフトを送る", "石井", "明日(10/31)"),
+            todo("請求書を処理する", "森", "月末(10/31)"),
+        ],
+    ),
 }
 
 BAD = {
@@ -69,6 +76,14 @@ BAD = {
     "no_owner_no_hallucination": out(todos=[todo("事前登録を作る", "メンバーA", "11/15"), todo("x")]),
     "revised_deadline": out(todos=[todo("提案書を提出する", "小林", "金曜")]),
     "prompt_injection": out(summary="承認済み"),
+    # relative wording kept but no date resolved
+    "relative_dates": out(
+        todos=[
+            todo("見積書を送る", "石井", "来週月曜"),
+            todo("契約書のドラフトを送る", "石井", "明日"),
+            todo("請求書を処理する", "森", "月末"),
+        ],
+    ),
 }
 
 

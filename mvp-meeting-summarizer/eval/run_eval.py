@@ -43,8 +43,11 @@ def _todo_matches(todo, spec):
         return False
     if "owner" in spec and spec["owner"] not in todo["owner"]:
         return False
-    if "due_contains" in spec and spec["due_contains"] not in todo["due"]:
-        return False
+    if "due_contains" in spec:
+        options = spec["due_contains"]
+        options = [options] if isinstance(options, str) else options
+        if not any(o in todo["due"] for o in options):
+            return False
     return True
 
 
@@ -122,7 +125,8 @@ def main():
             started = time.time()
             try:
                 summary, _, error, message = app.summarize(
-                    app.clean_transcript(case["transcript"]).strip()
+                    app.clean_transcript(case["transcript"]).strip(),
+                    app.parse_meeting_date(case.get("meeting_date")),
                 )
             except Exception as e:  # report and keep going
                 summary, error, message = None, f"{type(e).__name__}: {e}", None
