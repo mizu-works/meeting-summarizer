@@ -92,8 +92,9 @@ def count_free_uses_this_month(ip):
 @_locked
 def record_free_use(ip):
     os.makedirs(DATA_DIR, exist_ok=True)
-    is_new_file = not os.path.exists(FREE_USAGE_FILE)
     month_key = datetime.now(timezone.utc).strftime("%Y-%m")
+    _drop_previous_months(month_key)
+    is_new_file = not os.path.exists(FREE_USAGE_FILE)
     timestamp = datetime.now(timezone.utc).isoformat()
     with open(FREE_USAGE_FILE, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -101,6 +102,21 @@ def record_free_use(ip):
             writer.writerow(["ip", "month", "timestamp"])
         writer.writerow([ip, month_key, timestamp])
     return timestamp
+
+
+def _drop_previous_months(month_key):
+    """IP addresses are kept only to count this month's free uses (see the
+    privacy policy), so older rows are deleted. Rows are appended in time
+    order, so checking the first one is enough to know whether to prune."""
+    if not os.path.exists(FREE_USAGE_FILE):
+        return
+    with open(FREE_USAGE_FILE, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    if len(rows) < 2 or rows[1][1] == month_key:
+        return
+    kept = [rows[0]] + [r for r in rows[1:] if len(r) >= 2 and r[1] == month_key]
+    with open(FREE_USAGE_FILE, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerows(kept)
 
 
 @_locked

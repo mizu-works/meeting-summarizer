@@ -123,6 +123,7 @@
       var remember = document.getElementById("remember-code");
       var max = parseInt(counter.dataset.max, 10);
       var STORAGE_KEY = "gjk_access_code";
+      var elapsedTimer = null;
 
       function updateCount() {
         var n = textarea.value.length;
@@ -192,10 +193,15 @@
         button.disabled = true;
         button.textContent = "処理中…";
         document.getElementById("progress").hidden = false;
+        var started = Date.now();
+        elapsedTimer = setInterval(function () {
+          button.textContent = "処理中…(" + Math.round((Date.now() - started) / 1000) + "秒)";
+        }, 1000);
       });
 
       // Coming back via the browser's back button restores a disabled button from cache.
       window.addEventListener("pageshow", function () {
+        clearInterval(elapsedTimer);
         button.disabled = false;
         button.textContent = "要約・タスク抽出する";
         document.getElementById("progress").hidden = true;
