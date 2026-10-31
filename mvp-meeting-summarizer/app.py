@@ -4,6 +4,8 @@ import os
 import re
 import secrets
 import string
+import threading
+from functools import wraps
 from datetime import datetime, timezone
 
 import stripe
@@ -30,6 +32,21 @@ MODEL = "claude-sonnet-5"
 MAX_TOKENS = 16000
 
 
+# gunicorn runs one process with several threads (see render.yaml), so every
+# read-modify-write of the CSV files must hold this lock. A second process
+# would need a file lock instead.
+DATA_LOCK = threading.RLock()
+
+
+def _locked(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with DATA_LOCK:
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
 def get_client_ip():
     forwarded = request.headers.get("X-Forwarded-For", "")
     if forwarded:
@@ -37,6 +54,7 @@ def get_client_ip():
     return request.remote_addr or "unknown"
 
 
+@_locked
 def count_free_uses_this_month(ip):
     if not os.path.exists(FREE_USAGE_FILE):
         return 0
@@ -51,6 +69,7 @@ def count_free_uses_this_month(ip):
     return count
 
 
+@_locked
 def record_free_use(ip):
     os.makedirs(DATA_DIR, exist_ok=True)
     is_new_file = not os.path.exists(FREE_USAGE_FILE)
@@ -74,6 +93,7 @@ def normalize_code(code):
 ACCESS_CODE_PATTERN = re.compile(r"^GJK-[A-Z0-9]{8}$")
 
 
+@_locked
 def find_access_code_by_session(session_id):
     if not os.path.exists(ACCESS_CODES_FILE):
         return None
@@ -85,6 +105,7 @@ def find_access_code_by_session(session_id):
     return None
 
 
+@_locked
 def find_access_code_row(code):
     if not os.path.exists(ACCESS_CODES_FILE):
         return None
@@ -96,6 +117,7 @@ def find_access_code_row(code):
     return None
 
 
+@_locked
 def create_access_code(session_id, uses=PACK_USES, code=None):
     os.makedirs(DATA_DIR, exist_ok=True)
     code = code or generate_access_code()
@@ -166,7 +188,9 @@ def restore_code_from_stripe(code):
             remaining = int(md.get("remaining_uses", PACK_USES))
         except ValueError:
             remaining = PACK_USES
-        create_access_code(md.get("checkout_session_id", ""), remaining, code=code)
+        with DATA_LOCK:
+            if find_access_code_row(code) is None:
+                create_access_code(md.get("checkout_session_id", ""), remaining, code=code)
         return True
     return False
 
@@ -185,8 +209,18 @@ def code_has_remaining_uses(code):
 def redeem_code(code):
     """Validate a code and consume one use. Returns True if a use was consumed."""
     code = normalize_code(code)
-    if not code or not os.path.exists(ACCESS_CODES_FILE):
+    with DATA_LOCK:
+        consumed = _consume_one_use(code)
+    if consumed is None:
         return False
+    if consumed["stripe_session_id"]:
+        backup_code_to_stripe(consumed["stripe_session_id"], code, consumed["remaining_uses"])
+    return True
+
+
+def _consume_one_use(code):
+    if not code or not os.path.exists(ACCESS_CODES_FILE):
+        return None
     rows = []
     consumed = None
     with open(ACCESS_CODES_FILE, newline="", encoding="utf-8") as f:
@@ -197,15 +231,12 @@ def redeem_code(code):
                 row["remaining_uses"] = str(int(row["remaining_uses"]) - 1)
                 consumed = row
             rows.append(row)
-    if consumed is None:
-        return False
-    with open(ACCESS_CODES_FILE, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-    if consumed["stripe_session_id"]:
-        backup_code_to_stripe(consumed["stripe_session_id"], code, consumed["remaining_uses"])
-    return True
+    if consumed is not None:
+        with open(ACCESS_CODES_FILE, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+    return consumed
 
 
 TIMESTAMP_LINE = re.compile(r"^\s*(\d{1,2}:)?\d{1,2}:\d{2}[.,]\d{1,3}\s*-->")
@@ -438,23 +469,28 @@ def waitlist():
         if "@" not in email or "." not in email.split("@")[-1]:
             error = "有効なメールアドレスを入力してください。"
         else:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            is_new_file = not os.path.exists(WAITLIST_FILE)
-            with open(WAITLIST_FILE, "a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                if is_new_file:
-                    writer.writerow(["timestamp", "email", "role", "note"])
-                writer.writerow(
-                    [
-                        datetime.now(timezone.utc).isoformat(),
-                        csv_safe(email),
-                        csv_safe(role),
-                        csv_safe(note),
-                    ]
-                )
+            append_waitlist(email, role, note)
             submitted = True
 
     return render_template("waitlist.html", submitted=submitted, error=error)
+
+
+@_locked
+def append_waitlist(email, role, note):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    is_new_file = not os.path.exists(WAITLIST_FILE)
+    with open(WAITLIST_FILE, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if is_new_file:
+            writer.writerow(["timestamp", "email", "role", "note"])
+        writer.writerow(
+            [
+                datetime.now(timezone.utc).isoformat(),
+                csv_safe(email),
+                csv_safe(role),
+                csv_safe(note),
+            ]
+        )
 
 
 def restore_code_for_session(session):
@@ -501,11 +537,13 @@ def purchase_success():
             "purchase_success.html", error="お支払いが完了していません。", code=None
         )
 
-    existing = find_access_code_by_session(session_id)
-    if existing:
-        code = existing["code"]
-    else:
-        code = restore_code_for_session(session) or create_and_back_up_code(session_id, session)
+    # Atomic so two simultaneous loads of this page can't mint two codes.
+    with DATA_LOCK:
+        existing = find_access_code_by_session(session_id)
+        if existing:
+            code = existing["code"]
+        else:
+            code = restore_code_for_session(session) or create_and_back_up_code(session_id, session)
 
     return render_template("purchase_success.html", error=None, code=code, uses=PACK_USES)
 

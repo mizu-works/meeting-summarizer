@@ -612,3 +612,48 @@ def test_index_has_share_metadata(client):
 def test_robots_txt(client):
     r = client.get("/robots.txt")
     assert r.status_code == 200 and "Allow: /" in r.data.decode("utf-8")
+
+
+# --- Thread safety (gunicorn runs with --threads) ---------------------------------
+
+import threading as _threading
+
+
+def _run_concurrently(fn, n):
+    barrier = _threading.Barrier(n)
+    results = []
+
+    def worker():
+        barrier.wait()
+        results.append(fn())
+
+    threads = [_threading.Thread(target=worker) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return results
+
+
+def test_concurrent_redeems_never_exceed_purchased_uses(client):
+    code = app_module.create_access_code("sess_conc", uses=10)
+    results = _run_concurrently(lambda: app_module.redeem_code(code), 30)
+    assert results.count(True) == 10
+    assert app_module.find_access_code_row(code)["remaining_uses"] == "0"
+
+
+def test_new_codes_are_not_lost_while_others_are_redeemed(client):
+    """A rewrite during redeem must not drop a row appended at the same moment."""
+    code = app_module.create_access_code("sess_busy", uses=100)
+    created = []
+
+    def mixed(i=[0]):
+        i[0] += 1
+        if i[0] % 2:
+            return app_module.redeem_code(code)
+        created.append(app_module.create_access_code(f"sess_new_{i[0]}"))
+        return True
+
+    _run_concurrently(mixed, 40)
+    for c in created:
+        assert app_module.find_access_code_row(c) is not None
