@@ -267,18 +267,25 @@
     if (csvButton) {
       csvButton.addEventListener("click", function () {
         var todos = JSON.parse(document.getElementById("todos-data").textContent);
-        var cell = function (v) { return '"' + String(v).replace(/"/g, '""') + '"'; };
+        var cell = function (v) {
+          v = String(v);
+          // Excel runs cells starting with these as formulas; the text comes
+          // from the pasted transcript, so neutralize them like the server does.
+          if (/^[=+\-@\t\r]/.test(v)) v = "'" + v;
+          return '"' + v.replace(/"/g, '""') + '"';
+        };
         var rows = [["やること", "担当", "期限"]].concat(
           todos.map(function (t) { return [t.task, t.owner, t.due]; })
         );
         var csv = rows.map(function (r) { return r.map(cell).join(","); }).join("\r\n");
         // BOM so Excel opens the Japanese text correctly
-        var blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+        var blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
         var a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
         a.download = "todo.csv";
         a.click();
-        URL.revokeObjectURL(a.href);
+        // Revoking right away can cancel the download in some browsers.
+        setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
       });
     }
   </script>

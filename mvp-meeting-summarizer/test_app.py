@@ -1010,3 +1010,42 @@ def test_free_use_ips_from_previous_months_are_deleted(client):
         content = f.read()
     assert "203.0.113.9" not in content
     assert "198.51.100.1" in content and content.startswith("ip,month,timestamp")
+
+
+# --- Self-review fixes ----------------------------------------------------------------
+
+
+def test_failed_usage_log_write_does_not_lose_the_result(client):
+    with patch.object(
+        app_module.client.messages, "create", return_value=fake_message([text_block("結果あり")])
+    ), patch.object(app_module, "_write_usage_row", side_effect=OSError("disk full")):
+        r = client.post("/", data={"transcript": SAMPLE_TRANSCRIPT})
+    assert r.status_code == 200
+    assert "結果あり" in r.data.decode("utf-8")
+
+
+def test_free_checkout_with_full_coupon_still_gets_a_code(client):
+    with patch.object(
+        app_module.stripe.checkout.Session,
+        "retrieve",
+        return_value=SimpleNamespace(payment_status="no_payment_required", payment_intent=None),
+    ):
+        body = client.get("/purchase/success?session_id=cs_coupon").data.decode("utf-8")
+    assert "GJK-" in body
+
+
+def test_pruning_survives_a_malformed_row():
+    import os as _os
+
+    _os.makedirs(app_module.DATA_DIR, exist_ok=True)
+    with open(app_module.FREE_USAGE_FILE, "w", encoding="utf-8") as f:
+        f.write("ip,month,timestamp\nbroken-row\n203.0.113.9,2000-01,x\n")
+    app_module.record_free_use("198.51.100.1")
+    assert app_module.count_free_uses_this_month("198.51.100.1") == 1
+    with open(app_module.FREE_USAGE_FILE, encoding="utf-8") as f:
+        assert "203.0.113.9" not in f.read()
+
+
+def test_stripe_calls_cannot_hang_for_long():
+    assert app_module.stripe.default_http_client._timeout <= 10
+    assert app_module.stripe.max_network_retries <= 1
